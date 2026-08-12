@@ -45,8 +45,13 @@ function pieceName(char: string): string {
 function render(): void {
   const route = location.hash;
   if (route.startsWith("#/game/")) {
-    const id = decodeURIComponent(route.slice(7));
-    selectedGame = data.games.find((game) => game.id === id);
+    try {
+      const id = decodeURIComponent(route.slice(7));
+      selectedGame = data.games.find((game) => game.id === id);
+    } catch {
+      selectedGame = undefined;
+      location.hash = "#/";
+    }
   } else if (route === "#/cards") {
     selectedGame = undefined;
     renderCards();

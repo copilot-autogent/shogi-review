@@ -27,6 +27,17 @@ export function parseBackup(input: string): AppData {
         !game.reviewPoints.every(validReviewPoint) || !game.cards.every(validCard)) {
       throw new Error("備份含有無效棋局，未套用任何變更。");
     }
+    const sfens = game.sfens as string[];
+    const reviewPoints = game.reviewPoints as unknown[];
+    if (reviewPoints.some((point) => !isRecord(point) || (point.ply as number) < 0 || (point.ply as number) >= sfens.length ||
+      (typeof point.category !== "undefined" && (typeof point.category !== "string" || !["序盤知識", "候選手不足", "漏算對手強手", "戰術", "終盤", "時間管理", "其他"].includes(point.category))) ||
+      ["tag", "candidates", "opponentResponse", "externalNotes"].some((key) => typeof point[key] !== "undefined" && typeof point[key] !== "string"))) {
+      throw new Error("備份含有無效複盤欄位，未套用任何變更。");
+    }
+    const pointIds = new Set(reviewPoints.map((point) => (point as Record<string, unknown>).id));
+    if ((game.cards as unknown[]).some((card) => !isRecord(card) || !pointIds.has(card.reviewPointId))) {
+      throw new Error("備份含有找不到複盤點的卡片，未套用任何變更。");
+    }
   }
   return globalThis.structuredClone(data as AppData);
 }

@@ -48,10 +48,10 @@ export function parseGame(text: string, format: InputFormat, title = "未命名�
 }
 
 export function fnv1a(value: string): string {
-  let hash = 2166136261;
+  let hash = 14695981039346656037n;
   for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
+    hash ^= BigInt(value.charCodeAt(i));
+    hash = BigInt.asUintN(64, hash * 1099511628211n);
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return hash.toString(16).padStart(16, "0");
 }
