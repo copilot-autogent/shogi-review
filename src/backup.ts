@@ -23,6 +23,7 @@ export function parseBackup(input: string): AppData {
         typeof game.initialSfen !== "string" || !Position.isValidSFEN(game.initialSfen) ||
         !arrayOfStrings(game.sfens) || !arrayOfStrings(game.moves) || typeof game.canonicalHash !== "string" ||
         typeof game.createdAt !== "string" || !Array.isArray(game.reviewPoints) || !Array.isArray(game.cards) ||
+        game.sfens[0] !== game.initialSfen || game.sfens.length !== game.moves.length + 1 ||
         !game.sfens.every((sfen) => Position.isValidSFEN(sfen)) ||
         !game.reviewPoints.every(validReviewPoint) || !game.cards.every(validCard)) {
       throw new Error("備份含有無效棋局，未套用任何變更。");
@@ -44,7 +45,8 @@ export function parseBackup(input: string): AppData {
     if ((game.cards as unknown[]).some((card) => {
       if (!isRecord(card) || typeof card.reviewPointId !== "string" || !pointIds.has(card.reviewPointId) ||
         typeof card.id !== "string" || cardIds.has(card.id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(card.dueDate)) ||
-        Number.isNaN(Date.parse(`${card.dueDate}T00:00:00Z`))) return true;
+        Number.isNaN(Date.parse(`${card.dueDate}T00:00:00Z`)) ||
+        new Date(`${card.dueDate}T00:00:00Z`).toISOString().slice(0, 10) !== card.dueDate) return true;
       cardIds.add(card.id);
       return false;
     })) {

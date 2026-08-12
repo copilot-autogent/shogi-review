@@ -90,7 +90,11 @@ function renderCards(): void {
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-answer]").forEach((button) => button.addEventListener("click", () => {
     const cardElement = button.closest<HTMLElement>("[data-card]"); const game = data.games.find((item) => item.id === cardElement?.dataset.game); const card = game?.cards.find((item) => item.id === cardElement?.dataset.card);
-    if (game && card) { Object.assign(card, answerCard(card, button.dataset.answer === "again" ? "again" : "remembered")); void persist().then(renderCards); }
+    if (game && card) {
+      const previous = { ...card };
+      Object.assign(card, answerCard(card, button.dataset.answer === "again" ? "again" : "remembered"));
+      void persist().then(renderCards).catch(() => Object.assign(card, previous));
+    }
   }));
 }
 
@@ -170,8 +174,9 @@ async function savePoint(event: Event, game: Game): Promise<void> {
     externalNotes: String(values.get("externalNotes") || "") || undefined, importance: Number(values.get("importance") ?? 3),     createdAt: game.reviewPoints.find((item) => item.ply === selectedPly)?.createdAt ?? new Date().toISOString(),
   };
   if (!point.thinking || !point.nextConsideration) return;
-  game.reviewPoints = [...game.reviewPoints.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
-  await persist(); render();
+  const previous = game.reviewPoints;
+  game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
+  try { await persist(); render(); } catch { game.reviewPoints = previous; }
 }
 
 async function addCard(game: Game, point: ReviewPoint | undefined): Promise<void> {
