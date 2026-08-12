@@ -154,7 +154,11 @@ async function addGame(source: string, format: InputFormat, title: string): Prom
   try {
     const game = parseGame(source, format, title);
     const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash);
-    if (!existing) { data.games.push(game); await persist(); }
+    if (!existing) {
+      const previous = data.games;
+      data.games = [...previous, game];
+      try { await persist(); } catch { data.games = previous; throw new Error("匯入後儲存失敗，棋局未加入。"); }
+    }
     location.hash = `#/game/${encodeURIComponent((existing ?? game).id)}`; selectedPly = 0; render();
   } catch (error) { showError(error); }
 }

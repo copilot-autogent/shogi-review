@@ -21,7 +21,7 @@ export function parseBackup(input: string): AppData {
   const gameIds = new Set<string>();
   for (const game of (data as { games: unknown[] }).games) {
     if (!isRecord(game) || typeof game.id !== "string" || typeof game.title !== "string" ||
-        !["KIF", "KI2", "CSA"].includes(String(game.sourceFormat)) || typeof game.sourceText !== "string" ||
+        (game.sourceFormat !== "KIF" && game.sourceFormat !== "KI2" && game.sourceFormat !== "CSA") || typeof game.sourceText !== "string" ||
         typeof game.initialSfen !== "string" || !Position.isValidSFEN(game.initialSfen) ||
         !arrayOfStrings(game.sfens) || !arrayOfStrings(game.moves) || typeof game.canonicalHash !== "string" ||
         typeof game.createdAt !== "string" || gameIds.has(game.id) || !Array.isArray(game.reviewPoints) || !Array.isArray(game.cards) ||
