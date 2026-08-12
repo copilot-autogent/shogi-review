@@ -8,7 +8,7 @@ export function parseStoredData(value: unknown): AppData {
   if (value && typeof value === "object" && "schemaVersion" in value) {
     return parseBackup(JSON.stringify(value));
   }
-  return parseBackup(JSON.stringify({ schemaVersion: 3, data: value }));
+  return parseBackup(JSON.stringify({ schemaVersion: 1, data: value }));
 }
 
 export class MemoryRepository implements Repository {

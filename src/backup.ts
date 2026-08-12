@@ -29,7 +29,8 @@ export function migrateData(value: unknown, version: number): AppData {
 
 function migrateGame(raw: unknown): Game {
   if (!isRecord(raw)) throw new Error("備份含有無效棋局，未套用任何變更。");
-  const points = Array.isArray(raw.reviewPoints) ? raw.reviewPoints.map((point) => migratePoint(point)) : [];
+  if (!Array.isArray(raw.reviewPoints)) throw new Error("備份缺少複盤資料，未套用任何變更。");
+  const points = raw.reviewPoints.map((point) => migratePoint(point));
   return {
     id: string(raw.id), title: string(raw.title), sourceFormat: raw.sourceFormat as Game["sourceFormat"],
     sourceText: string(raw.sourceText), initialSfen: string(raw.initialSfen), sfens: requiredStrings(raw.sfens),
@@ -40,6 +41,9 @@ function migrateGame(raw: unknown): Game {
 
 function migratePoint(raw: unknown): ReviewPoint {
   if (!isRecord(raw)) throw new Error("備份含有無效複盤欄位，未套用任何變更。");
+  for (const key of ["thinking", "tag", "candidates", "opponentResponse", "nextConsideration", "externalNotes", "legacyNotes"]) {
+    if (typeof raw[key] !== "undefined" && typeof raw[key] !== "string") throw new Error("備份含有無效複盤文字，未套用任何變更。");
+  }
   const legacy: string[] = [];
   const add = (label: string, key: string) => { const value = raw[key]; if (typeof value === "string" && value.trim()) legacy.push(`${label}：${value}`); };
   add("當時想法", "thinking"); add("標籤", "tag"); add("候選手", "candidates"); add("對手應手", "opponentResponse");
@@ -61,7 +65,8 @@ function validateData(data: AppData): void {
   if (!isRecord(data) || !Array.isArray(data.games)) throw new Error("備份資料結構不完整，未套用任何變更。");
   const ids = new Set<string>();
   for (const game of data.games) {
-    if (!isRecord(game) || typeof game.id !== "string" || ids.has(game.id) || !["KIF", "KI2", "CSA"].includes(game.sourceFormat as string) ||
+    if (!isRecord(game) || typeof game.id !== "string" || typeof game.title !== "string" || typeof game.createdAt !== "string" ||
+      ids.has(game.id) || !["KIF", "KI2", "CSA"].includes(game.sourceFormat as string) ||
       typeof game.sourceText !== "string" || typeof game.initialSfen !== "string" || !Position.isValidSFEN(game.initialSfen) ||
       !strings(game.sfens) || !strings(game.moves) || game.sfens.length !== game.moves.length + 1 ||
       game.sfens[0] !== game.initialSfen || !game.sfens.every((sfen) => Position.isValidSFEN(sfen)) || !Array.isArray(game.reviewPoints)) {
@@ -77,7 +82,11 @@ function validateData(data: AppData): void {
     for (const point of game.reviewPoints) {
       if (!isRecord(point) || typeof point.id !== "string" || pointIds.has(point.id) || !Number.isInteger(point.ply) ||
         point.ply < 0 || point.ply >= game.sfens.length || point.sfen !== game.sfens[point.ply] || !REASONS.includes(point.reason as Reason) ||
-        !Array.isArray(point.issueTags) || point.issueTags.some((tag) => !ISSUE_TAGS.includes(tag as IssueTag))) {
+        !Array.isArray(point.issueTags) || point.issueTags.some((tag) => !ISSUE_TAGS.includes(tag as IssueTag)) ||
+        (typeof point.note !== "undefined" && typeof point.note !== "string") ||
+        (typeof point.externalNotes !== "undefined" && typeof point.externalNotes !== "string") ||
+        (typeof point.legacyNotes !== "undefined" && typeof point.legacyNotes !== "string") ||
+        typeof point.createdAt !== "string") {
         throw new Error("備份含有無效複盤欄位，未套用任何變更。");
       }
       pointIds.add(point.id);

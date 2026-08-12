@@ -4,7 +4,9 @@ import { ISSUE_TAGS, REASONS, type AppData, type Game, type IssueTag, type Reaso
 import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
 import "./style.css";
 
-let repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository();
+let repo: Repository;
+try { repo = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository(); }
+catch { repo = new MemoryRepository(); }
 let data: AppData = { games: [] };
 let selectedGame: Game | undefined;
 let selectedPly = 0;
@@ -55,8 +57,11 @@ function render(): void {
   const route = location.hash;
   if (route.startsWith("#/game/")) {
     const [rawId, query = ""] = route.slice(7).split("?");
-    const id = decodeURIComponent(rawId ?? ""); const params = new URLSearchParams(query);
-    selectedPly = Number(params.get("ply") ?? selectedPly); rethinkMode = params.get("rethink") === "1";
+    let id = "";
+    try { id = decodeURIComponent(rawId ?? ""); } catch { location.hash = "#/"; return; }
+    const params = new URLSearchParams(query);
+    const requestedPly = Number(params.get("ply"));
+    selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1";
     selectedGame = data.games.find((game) => game.id === id);
     if (!selectedGame) location.hash = "#/";
     else { renderGame(selectedGame); return; }
@@ -111,10 +116,10 @@ function renderGame(game: Game): void {
 }
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
 async function importText(): Promise<void> { try { await addGame(document.querySelector<HTMLTextAreaElement>("#source")?.value ?? "", document.querySelector<HTMLSelectElement>("#format")?.value as InputFormat, document.querySelector<HTMLInputElement>("#title")?.value ?? ""); } catch (error) { showError(error); } }
-async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { await addGame(decodeRecordBytes(new Uint8Array(await file.arrayBuffer())), detectFormat("", file.name), file.name); } catch (error) { showError(error); } }
+async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const source = decodeRecordBytes(new Uint8Array(await file.arrayBuffer())); await addGame(source, detectFormat(source, file.name), file.name); } catch (error) { showError(error); } }
 async function addGame(source: string, format: InputFormat, title: string): Promise<void> {
   const game = parseGame(source, format, title); const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash);
-  if (!existing) { data.games = [...data.games, game]; await persist(); }
+  if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } }
   location.hash = `#/game/${encodeURIComponent((existing ?? game).id)}`; selectedPly = 0; render();
 }
 async function savePoint(event: Event, game: Game): Promise<void> {
@@ -122,7 +127,7 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   if (!REASONS.includes(reason as Reason)) { form.reportValidity(); return; }
   const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() };
   const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
-  try { await persist(); render(); } catch (error) { game.reviewPoints = previous; showError(error); }
+  try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); }
 }
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 function editPoint(id: string): void { const point = data.games.flatMap((game) => game.reviewPoints.map((item) => ({ game, item }))).find(({ item }) => item.id === id); if (point) { selectedPly = point.item.ply; location.hash = `#/game/${encodeURIComponent(point.game.id)}`; } }
