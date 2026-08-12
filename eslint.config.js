@@ -9,7 +9,10 @@ export default [
     files: ["**/*.ts"],
     languageOptions: {
       parser, parserOptions: { project: "./tsconfig.json" },
-      globals: { window: "readonly", document: "readonly", location: "readonly", crypto: "readonly", indexedDB: "readonly" },
+      globals: {
+        window: "readonly", document: "readonly", location: "readonly", crypto: "readonly", indexedDB: "readonly",
+        TextDecoder: "readonly", TextEncoder: "readonly", Blob: "readonly", URL: "readonly", FormData: "readonly",
+      },
     },
     plugins: { "@typescript-eslint": tseslint },
     rules: { "no-unused-vars": "off", "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }] },

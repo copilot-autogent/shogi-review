@@ -29,13 +29,25 @@ export function parseBackup(input: string): AppData {
     }
     const sfens = game.sfens as string[];
     const reviewPoints = game.reviewPoints as unknown[];
-    if (reviewPoints.some((point) => !isRecord(point) || (point.ply as number) < 0 || (point.ply as number) >= sfens.length ||
-      (typeof point.category !== "undefined" && (typeof point.category !== "string" || !["序盤知識", "候選手不足", "漏算對手強手", "戰術", "終盤", "時間管理", "其他"].includes(point.category))) ||
-      ["tag", "candidates", "opponentResponse", "externalNotes"].some((key) => typeof point[key] !== "undefined" && typeof point[key] !== "string"))) {
+    const pointIds = new Set<string>();
+    if (reviewPoints.some((point) => {
+      if (!isRecord(point) || typeof point.ply !== "number" || point.ply < 0 || point.ply >= sfens.length ||
+        (typeof point.category !== "undefined" && (typeof point.category !== "string" || !["序盤知識", "候選手不足", "漏算對手強手", "戰術", "終盤", "時間管理", "其他"].includes(point.category as string))) ||
+        ["tag", "candidates", "opponentResponse", "externalNotes"].some((key) => typeof point[key] !== "undefined" && typeof point[key] !== "string") ||
+        typeof point.id !== "string" || pointIds.has(point.id) || point.sfen !== sfens[point.ply]) return true;
+      pointIds.add(point.id);
+      return false;
+    })) {
       throw new Error("備份含有無效複盤欄位，未套用任何變更。");
     }
-    const pointIds = new Set(reviewPoints.map((point) => (point as Record<string, unknown>).id));
-    if ((game.cards as unknown[]).some((card) => !isRecord(card) || !pointIds.has(card.reviewPointId))) {
+    const cardIds = new Set<string>();
+    if ((game.cards as unknown[]).some((card) => {
+      if (!isRecord(card) || typeof card.reviewPointId !== "string" || !pointIds.has(card.reviewPointId) ||
+        typeof card.id !== "string" || cardIds.has(card.id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(card.dueDate)) ||
+        Number.isNaN(Date.parse(`${card.dueDate}T00:00:00Z`))) return true;
+      cardIds.add(card.id);
+      return false;
+    })) {
       throw new Error("備份含有找不到複盤點的卡片，未套用任何變更。");
     }
   }

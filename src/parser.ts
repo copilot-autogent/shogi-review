@@ -20,7 +20,7 @@ export function decodeRecordBytes(bytes: Uint8Array): string {
 
 export function detectFormat(text: string, fileName = ""): InputFormat {
   const ext = fileName.toLowerCase().split(".").pop();
-  if (ext === "csa" || text.includes("N+") || text.includes("N-")) return "CSA";
+  if (ext === "csa" || /^(?:V\d|N[+-]|P[1-9][+-]|[+-]\d{4})/m.test(text)) return "CSA";
   if (ext === "ki2") return "KI2";
   return "KIF";
 }

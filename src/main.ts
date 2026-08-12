@@ -138,7 +138,10 @@ async function importText(): Promise<void> {
 async function importFile(event: Event): Promise<void> {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  try { await addGame(decodeRecordBytes(new Uint8Array(await file.arrayBuffer())), detectFormat("", file.name), file.name); } catch (error) { showError(error); }
+  try {
+    const text = decodeRecordBytes(new Uint8Array(await file.arrayBuffer()));
+    await addGame(text, detectFormat(text, file.name), file.name);
+  } catch (error) { showError(error); }
 }
 
 async function addGame(source: string, format: InputFormat, title: string): Promise<void> {
@@ -164,7 +167,7 @@ async function savePoint(event: Event, game: Game): Promise<void> {
     ply: selectedPly, sfen: game.sfens[selectedPly], thinking: String(values.get("thinking") ?? ""),
     nextConsideration: String(values.get("nextConsideration") ?? ""), category: (String(values.get("category") || "") || undefined) as ReviewPoint["category"],
     tag: String(values.get("tag") || "") || undefined, candidates: String(values.get("candidates") || "") || undefined,
-    externalNotes: String(values.get("externalNotes") || "") || undefined, importance: Number(values.get("importance") ?? 3), createdAt: new Date().toISOString(),
+    externalNotes: String(values.get("externalNotes") || "") || undefined, importance: Number(values.get("importance") ?? 3),     createdAt: game.reviewPoints.find((item) => item.ply === selectedPly)?.createdAt ?? new Date().toISOString(),
   };
   if (!point.thinking || !point.nextConsideration) return;
   game.reviewPoints = [...game.reviewPoints.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);

@@ -22,6 +22,7 @@ export class IndexedDbRepository implements Repository {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error("IndexedDB 開啟失敗。"));
     });
+    void this.dbPromise.catch(() => undefined);
   }
   async load(): Promise<AppData> {
     const db = await this.dbPromise;
