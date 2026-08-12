@@ -12,6 +12,7 @@ let selectedGame: Game | undefined;
 let selectedPly = 0;
 let rethinkMode = false;
 let startupError = "";
+let renderedRoute = "";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
@@ -56,6 +57,17 @@ function board(sfen: string): string {
 }
 function optionList(values: readonly string[], selected: string): string { return values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(value)}</option>`).join(""); }
 function tagChecks(selected: IssueTag[]): string { return ISSUE_TAGS.map((tag) => `<label class="check"><input type="checkbox" name="issueTags" value="${esc(tag)}" ${selected.includes(tag) ? "checked" : ""}>${esc(tag)}</label>`).join(""); }
+function gameHash(gameId: string, ply: number, rethink = false): string {
+  return `#/game/${encodeURIComponent(gameId)}?ply=${ply}${rethink ? "&rethink=1" : ""}`;
+}
+function setPly(ply: number): void {
+  if (!selectedGame) return;
+  const nextPly = Math.max(0, Math.min(ply, selectedGame.moves.length));
+  location.hash = gameHash(selectedGame.id, nextPly, rethinkMode);
+}
+function resetScroll(): void {
+  if (typeof window.scrollTo === "function") window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+}
 
 function render(): void {
   const route = location.hash;
@@ -68,8 +80,17 @@ function render(): void {
     selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1";
     selectedGame = data.games.find((game) => game.id === id);
     if (!selectedGame) location.hash = "#/";
-    else { selectedPly = Math.min(selectedPly, selectedGame.moves.length); renderGame(selectedGame); return; }
+    else {
+      selectedPly = Math.min(selectedPly, selectedGame.moves.length);
+      const routeKey = `#/game/${rawId}`;
+      if (routeKey !== renderedRoute) resetScroll();
+      renderedRoute = routeKey;
+      renderGame(selectedGame);
+      return;
+    }
   }
+  if (renderedRoute !== "#/") resetScroll();
+  renderedRoute = "#/";
   renderHome();
 }
 function renderHome(): void {
@@ -84,10 +105,10 @@ function renderHome(): void {
   document.querySelector("#export")?.addEventListener("click", exportData);
   document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e));
   document.querySelector("#library")?.addEventListener("change", filterLibrary);
-  document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = `#/game/${encodeURIComponent(el.dataset.open ?? "")}?ply=${el.dataset.ply ?? 0}`; }));
+  document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.open ?? "", Number(el.dataset.ply ?? 0)); }));
   document.querySelectorAll<HTMLElement>("[data-edit]").forEach((el) => el.addEventListener("click", () => editPoint(el.dataset.edit!)));
   document.querySelectorAll<HTMLElement>("[data-delete]").forEach((el) => el.addEventListener("click", () => void deletePoint(el.dataset.delete!)));
-  document.querySelectorAll<HTMLElement>("[data-rethink]").forEach((el) => el.addEventListener("click", () => { location.hash = `#/game/${encodeURIComponent(el.dataset.rethink ?? "")}?ply=${el.dataset.ply}&rethink=1`; }));
+  document.querySelectorAll<HTMLElement>("[data-rethink]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.rethink ?? "", Number(el.dataset.ply ?? 0), true); }));
 }
 function renderLibrary(): string {
   const points = data.games.flatMap((game) => game.reviewPoints.map((point) => ({ game, point })));
@@ -111,10 +132,10 @@ function renderGame(game: Game): void {
   const sfen = game.sfens[selectedPly] ?? game.initialSfen;
   const point = game.reviewPoints.find((item) => item.ply === selectedPly);
   const rethink = rethinkMode && point ? `<section class="rethink panel"><h2>重新思考</h2>${board(point.sfen)}<p class="prompt">如果再遇到這個局面，你會先注意什麼？</p><button id="reveal">揭示記錄</button><div id="reveal-content" hidden><p><strong>原因：</strong>${esc(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(esc).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次注意：</strong>${esc(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${esc(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${esc(point.legacyNotes)}</p></details>` : ""}</div></section>` : "";
-  app!.innerHTML = `<header><a href="#/">← 首頁</a><h1>${esc(game.title)}</h1><p>${game.sourceFormat} · ${game.moves.length} 手</p></header><main class="review-layout"><section class="panel replay">${board(sfen)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form" novalidate><label><span>為什麼標記這裡？ <strong aria-hidden="true">*</strong></span><select name="reason" required aria-required="true">${optionList(REASONS, point?.reason ?? "")}</select></label><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label>下次要注意什麼？<textarea name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><textarea name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details>${point?.legacyNotes ? `<details open><summary>舊版筆記</summary><textarea name="legacyNotes" readonly>${esc(point.legacyNotes)}</textarea></details>` : ""}<button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`;
-  document.querySelector("#prev")?.addEventListener("click", () => { selectedPly -= 1; render(); });
-  document.querySelector("#next")?.addEventListener("click", () => { selectedPly += 1; render(); });
-  document.querySelectorAll<HTMLElement>("[data-ply]").forEach((el) => el.addEventListener("click", () => { selectedPly = Number(el.dataset.ply); render(); }));
+  app!.innerHTML = `<header><a href="#/">← 首頁</a><h1>${esc(game.title)}</h1><p>${game.sourceFormat} · ${game.moves.length} 手</p></header><main class="review-layout"><section class="panel replay">${board(sfen)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label><span>為什麼標記這裡？ <strong aria-hidden="true">*</strong></span><select name="reason" required>${`<option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>`}${optionList(REASONS, point?.reason ?? "")}</select></label><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label><span>下次要注意什麼？</span><textarea name="note">${esc(point?.note ?? "")}</textarea></label><details><summary>外部分析筆記</summary><textarea name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details>${point?.legacyNotes ? `<details open><summary>舊版筆記</summary><textarea name="legacyNotes" readonly>${esc(point.legacyNotes)}</textarea></details>` : ""}<button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`;
+  document.querySelector("#prev")?.addEventListener("click", () => setPly(selectedPly - 1));
+  document.querySelector("#next")?.addEventListener("click", () => setPly(selectedPly + 1));
+  document.querySelectorAll<HTMLElement>("[data-ply]").forEach((el) => el.addEventListener("click", () => setPly(Number(el.dataset.ply))));
   document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game));
   document.querySelector("#reveal")?.addEventListener("click", () => { const content = document.querySelector<HTMLElement>("#reveal-content"); if (content) { content.hidden = false; (document.querySelector("#reveal") as HTMLButtonElement).remove(); } });
 }
@@ -124,10 +145,12 @@ async function importFile(event: Event): Promise<void> { const file = (event.tar
 async function addGame(source: string, format: InputFormat, title: string): Promise<void> {
   const game = parseGame(source, format, title); const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash);
   if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } }
-  location.hash = `#/game/${encodeURIComponent((existing ?? game).id)}`; selectedPly = 0; render();
+  location.hash = gameHash((existing ?? game).id, 0); render();
 }
 async function savePoint(event: Event, game: Game): Promise<void> {
-  event.preventDefault(); const form = event.currentTarget as HTMLFormElement; const values = new FormData(form); const reason = String(values.get("reason") ?? "");
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? "");
   if (!REASONS.includes(reason as Reason)) { form.reportValidity(); return; }
   const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() };
   const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
