@@ -1,5 +1,6 @@
 import type { AppData } from "./model.js";
 import { Position } from "tsshogi";
+import { parseGame } from "./parser.js";
 
 export interface Backup { schemaVersion: 1; exportedAt: string; data: AppData; }
 
@@ -29,6 +30,15 @@ export function parseBackup(input: string): AppData {
       throw new Error("備份含有無效棋局，未套用任何變更。");
     }
     const sfens = game.sfens as string[];
+    try {
+      const reconstructed = parseGame(game.sourceText, game.sourceFormat as "KIF" | "KI2" | "CSA", game.title);
+      if (reconstructed.initialSfen !== game.initialSfen || reconstructed.canonicalHash !== game.canonicalHash ||
+        reconstructed.sfens.length !== sfens.length || reconstructed.sfens.some((sfen, index) => sfen !== sfens[index])) {
+        throw new Error("棋譜與局面快照不一致。");
+      }
+    } catch (error) {
+      throw new Error(`備份棋譜驗證失敗：${error instanceof Error ? error.message : "內容不一致"}。`);
+    }
     const reviewPoints = game.reviewPoints as unknown[];
     const pointIds = new Set<string>();
     if (reviewPoints.some((point) => {

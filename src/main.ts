@@ -5,7 +5,7 @@ import { answerCard, isDue, newCard } from "./schedule.js";
 import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
 import "./style.css";
 
-const repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository();
+let repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository();
 let data: AppData = { games: [] };
 let selectedGame: Game | undefined;
 let selectedPly = 0;
@@ -57,6 +57,7 @@ function render(): void {
     renderCards();
     return;
   }
+  if (!route.startsWith("#/game/")) selectedGame = undefined;
   if (!selectedGame) renderHome(); else renderGame(selectedGame);
 }
 
@@ -84,7 +85,7 @@ function renderHome(): void {
 
 function renderCards(): void {
   const due = data.games.flatMap((game) => game.cards.filter((card) => isDue(card).valueOf()).map((card) => ({ game, card, point: game.reviewPoints.find((item) => item.id === card.reviewPointId) }))).filter((item) => item.point);
-  app!.innerHTML = `<header><a href="#/">← 我的棋局</a><h1>複習卡</h1><p>先看局面，心中選一手，再揭示自己的記錄。</p></header><main><section class="panel">${due.length ? due.map(({ game, card, point }) => `<article class="card-review" data-card="${card.id}" data-game="${game.id}"><h2>${esc(game.title)} · 第 ${point!.ply} 手</h2>${board(point!.sfen)}<p class="prompt">我當時在想什麼？</p><button class="reveal">揭示記錄</button><div class="answer-content" hidden><p><strong>我的記錄：</strong>${esc(point!.thinking)}</p><p><strong>下次先考慮：</strong>${esc(point!.nextConsideration)}</p>${point!.externalNotes ? `<p><strong>外部筆記：</strong>${esc(point!.externalNotes)}</p>` : ""}<div class="actions"><button data-answer="again">再想一次（1 天）</button><button data-answer="remembered">記住了（下一階段）</button></div></div></article>`).join("") : "<p class='muted'>目前沒有到期卡片。從棋局複盤點加入卡片吧。</p>"}</section></main>`;
+  app!.innerHTML = `<header><a href="#/">← 我的棋局</a><h1>複習卡</h1><p>先看局面，心中選一手，再揭示自己的記錄。</p></header><main><section class="panel">${due.length ? due.map(({ game, card, point }) => `<article class="card-review" data-card="${esc(card.id)}" data-game="${esc(game.id)}"><h2>${esc(game.title)} · 第 ${point!.ply} 手</h2>${board(point!.sfen)}<p class="prompt">我當時在想什麼？</p><button class="reveal">揭示記錄</button><div class="answer-content" hidden><p><strong>我的記錄：</strong>${esc(point!.thinking)}</p><p><strong>下次先考慮：</strong>${esc(point!.nextConsideration)}</p>${point!.externalNotes ? `<p><strong>外部筆記：</strong>${esc(point!.externalNotes)}</p>` : ""}<div class="actions"><button data-answer="again">再想一次（1 天）</button><button data-answer="remembered">記住了（下一階段）</button></div></div></article>`).join("") : "<p class='muted'>目前沒有到期卡片。從棋局複盤點加入卡片吧。</p>"}</section></main>`;
   document.querySelectorAll<HTMLElement>(".reveal").forEach((button) => button.addEventListener("click", () => {
     const content = button.parentElement?.querySelector<HTMLElement>(".answer-content"); if (content) { content.hidden = false; button.remove(); }
   }));
@@ -181,7 +182,9 @@ async function savePoint(event: Event, game: Game): Promise<void> {
 
 async function addCard(game: Game, point: ReviewPoint | undefined): Promise<void> {
   if (!point || game.cards.some((card) => card.reviewPointId === point.id)) return;
-  game.cards.push(newCard(point.id)); await persist(); render();
+  const card = newCard(point.id);
+  game.cards.push(card);
+  try { await persist(); render(); } catch { game.cards = game.cards.filter((item) => item !== card); }
 }
 
 async function persist(): Promise<void> {
@@ -204,4 +207,9 @@ async function restoreFile(event: Event): Promise<void> {
 }
 
 window.addEventListener("hashchange", render);
-void repo.load().then((loaded) => { data = loaded; render(); }).catch((error) => showError(error));
+void repo.load().then((loaded) => { data = loaded; render(); }).catch((error) => {
+  showError(error);
+  repo = new MemoryRepository();
+  data = { games: [] };
+  render();
+});
