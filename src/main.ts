@@ -24,9 +24,13 @@ function pieceName(char: string, promoted: boolean): string {
 }
 function hands(sfen: string, side: "gote" | "sente"): string {
   const hand = sfen.split(" ")[2] ?? "-";
-  const chars = side === "gote" ? [...hand].filter((c) => c === c.toLowerCase()) : [...hand].filter((c) => c === c.toUpperCase());
-  const counts = new Map<string, number>();
-  for (const char of chars) counts.set(char.toUpperCase(), (counts.get(char.toUpperCase()) ?? 0) + 1);
+  const counts = new Map<string, number>(); let multiplier = 0;
+  for (const char of hand) {
+    if (/\d/.test(char)) { multiplier = multiplier * 10 + Number(char); continue; }
+    const isGote = char === char.toLowerCase();
+    if (char !== "-" && isGote === (side === "gote")) counts.set(char.toUpperCase(), (counts.get(char.toUpperCase()) ?? 0) + (multiplier || 1));
+    multiplier = 0;
+  }
   return [...counts.entries()].map(([char, count]) => `<span class="hand-piece">${pieceName(char, false)}${count > 1 ? `<b aria-label="${count}枚">×${count}</b>` : ""}</span>`).join("") || "<span class=\"empty-hand\">なし</span>";
 }
 function board(sfen: string): string {
@@ -64,7 +68,7 @@ function render(): void {
     selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1";
     selectedGame = data.games.find((game) => game.id === id);
     if (!selectedGame) location.hash = "#/";
-    else { renderGame(selectedGame); return; }
+    else { selectedPly = Math.min(selectedPly, selectedGame.moves.length); renderGame(selectedGame); return; }
   }
   renderHome();
 }
@@ -80,7 +84,7 @@ function renderHome(): void {
   document.querySelector("#export")?.addEventListener("click", exportData);
   document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e));
   document.querySelector("#library")?.addEventListener("change", filterLibrary);
-  document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { selectedPly = Number(el.dataset.ply ?? 0); location.hash = `#/game/${encodeURIComponent(el.dataset.open ?? "")}`; }));
+  document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = `#/game/${encodeURIComponent(el.dataset.open ?? "")}?ply=${el.dataset.ply ?? 0}`; }));
   document.querySelectorAll<HTMLElement>("[data-edit]").forEach((el) => el.addEventListener("click", () => editPoint(el.dataset.edit!)));
   document.querySelectorAll<HTMLElement>("[data-delete]").forEach((el) => el.addEventListener("click", () => void deletePoint(el.dataset.delete!)));
   document.querySelectorAll<HTMLElement>("[data-rethink]").forEach((el) => el.addEventListener("click", () => { location.hash = `#/game/${encodeURIComponent(el.dataset.rethink ?? "")}?ply=${el.dataset.ply}&rethink=1`; }));
@@ -130,7 +134,7 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); }
 }
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
-function editPoint(id: string): void { const point = data.games.flatMap((game) => game.reviewPoints.map((item) => ({ game, item }))).find(({ item }) => item.id === id); if (point) { selectedPly = point.item.ply; location.hash = `#/game/${encodeURIComponent(point.game.id)}`; } }
+function editPoint(id: string): void { const point = data.games.flatMap((game) => game.reviewPoints.map((item) => ({ game, item }))).find(({ item }) => item.id === id); if (point) { location.hash = `#/game/${encodeURIComponent(point.game.id)}?ply=${point.item.ply}`; } }
 async function deletePoint(id: string): Promise<void> { if (!window.confirm("確定刪除此複盤局面？")) return; const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); render(); } catch (error) { game.reviewPoints = previous; showError(error); } }
 async function persist(): Promise<void> { await repo.save(data); }
 function exportData(): void { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); }

@@ -44,6 +44,7 @@ function migratePoint(raw: unknown): ReviewPoint {
   for (const key of ["thinking", "tag", "candidates", "opponentResponse", "nextConsideration", "externalNotes", "legacyNotes"]) {
     if (typeof raw[key] !== "undefined" && typeof raw[key] !== "string") throw new Error("備份含有無效複盤文字，未套用任何變更。");
   }
+    if (typeof raw.note !== "undefined" && typeof raw.note !== "string") throw new Error("備份含有無效複盤文字，未套用任何變更。");
   const legacy: string[] = [];
   const add = (label: string, key: string) => { const value = raw[key]; if (typeof value === "string" && value.trim()) legacy.push(`${label}：${value}`); };
   add("當時想法", "thinking"); add("標籤", "tag"); add("候選手", "candidates"); add("對手應手", "opponentResponse");
@@ -51,6 +52,9 @@ function migratePoint(raw: unknown): ReviewPoint {
   const mapped = CATEGORY_MIGRATION[category] ?? { reason: "其他" as const };
   if (category && !CATEGORY_MIGRATION[category]) legacy.push(`舊分類：${category}`);
   const reason = REASONS.includes(raw.reason as Reason) ? raw.reason as Reason : mapped.reason;
+  if (typeof raw.issueTags !== "undefined" && (!Array.isArray(raw.issueTags) || raw.issueTags.some((tag) => !ISSUE_TAGS.includes(tag as IssueTag)))) {
+    throw new Error("備份含有無效問題標籤，未套用任何變更。");
+  }
   const tags = Array.isArray(raw.issueTags) ? raw.issueTags.filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)) : [];
   if (mapped.tag && !tags.includes(mapped.tag)) tags.push(mapped.tag);
   const note = typeof raw.note === "string" && raw.note.trim() ? raw.note : (typeof raw.nextConsideration === "string" && raw.nextConsideration.trim() ? raw.nextConsideration : undefined);
@@ -64,6 +68,7 @@ function migratePoint(raw: unknown): ReviewPoint {
 function validateData(data: AppData): void {
   if (!isRecord(data) || !Array.isArray(data.games)) throw new Error("備份資料結構不完整，未套用任何變更。");
   const ids = new Set<string>();
+  const pointIds = new Set<string>();
   for (const game of data.games) {
     if (!isRecord(game) || typeof game.id !== "string" || typeof game.title !== "string" || typeof game.createdAt !== "string" ||
       ids.has(game.id) || !["KIF", "KI2", "CSA"].includes(game.sourceFormat as string) ||
@@ -78,7 +83,6 @@ function validateData(data: AppData): void {
       if (reconstructed.canonicalHash !== game.canonicalHash || reconstructed.moves.join("|") !== game.moves.join("|") ||
         reconstructed.sfens.join("|") !== game.sfens.join("|")) throw new Error("棋譜與局面快照不一致；請重新匯入原始棋譜。");
     } catch (error) { throw new Error(`備份棋譜驗證失敗：${error instanceof Error ? error.message : "內容不一致"}。`); }
-    const pointIds = new Set<string>();
     for (const point of game.reviewPoints) {
       if (!isRecord(point) || typeof point.id !== "string" || pointIds.has(point.id) || !Number.isInteger(point.ply) ||
         point.ply < 0 || point.ply >= game.sfens.length || point.sfen !== game.sfens[point.ply] || !REASONS.includes(point.reason as Reason) ||
