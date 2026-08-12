@@ -56,12 +56,14 @@ export function parseBackup(input: string): AppData {
       throw new Error("備份含有無效複盤欄位，未套用任何變更。");
     }
     const cardIds = new Set<string>();
+    const cardPointIds = new Set<string>();
     if ((game.cards as unknown[]).some((card) => {
       if (!isRecord(card) || typeof card.reviewPointId !== "string" || !pointIds.has(card.reviewPointId) ||
         typeof card.id !== "string" || cardIds.has(card.id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(card.dueDate)) ||
-        Number.isNaN(Date.parse(`${card.dueDate}T00:00:00Z`)) ||
+        cardPointIds.has(card.reviewPointId) || Number.isNaN(Date.parse(`${card.dueDate}T00:00:00Z`)) ||
         new Date(`${card.dueDate}T00:00:00Z`).toISOString().slice(0, 10) !== card.dueDate) return true;
       cardIds.add(card.id);
+      cardPointIds.add(card.reviewPointId);
       return false;
     })) {
       throw new Error("備份含有找不到複盤點的卡片，未套用任何變更。");

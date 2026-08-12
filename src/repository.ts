@@ -35,9 +35,11 @@ export class IndexedDbRepository implements Repository {
   async save(data: AppData): Promise<void> {
     const db = await this.dbPromise;
     await new Promise<void>((resolve, reject) => {
-      const request = db.transaction("state", "readwrite").objectStore("state").put(globalThis.structuredClone(data), "app");
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error ?? new Error("儲存資料失敗。"));
+      const transaction = db.transaction("state", "readwrite");
+      transaction.objectStore("state").put(globalThis.structuredClone(data), "app");
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("儲存資料失敗。"));
+      transaction.onabort = () => reject(transaction.error ?? new Error("儲存交易已取消。"));
     });
   }
 }

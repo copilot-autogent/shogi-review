@@ -48,6 +48,7 @@ function render(): void {
   if (route.startsWith("#/game/")) {
     try {
       const id = decodeURIComponent(route.slice(7));
+      if (selectedGame?.id !== id) selectedPly = 0;
       selectedGame = data.games.find((game) => game.id === id);
     } catch {
       selectedGame = undefined;
@@ -173,7 +174,7 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   const form = event.currentTarget as HTMLFormElement;
   const values = new FormData(form);
   const point: ReviewPoint = {
-    id: game.reviewPoints.find((item) => item.ply === selectedPly)?.id ?? `point-${crypto.randomUUID()}`,
+    id: game.reviewPoints.find((item) => item.ply === selectedPly)?.id ?? `point-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`,
     ply: selectedPly, sfen: game.sfens[selectedPly], thinking: String(values.get("thinking") ?? ""),
     nextConsideration: String(values.get("nextConsideration") ?? ""), category: (String(values.get("category") || "") || undefined) as ReviewPoint["category"],
     tag: String(values.get("tag") || "") || undefined, candidates: String(values.get("candidates") || "") || undefined,
@@ -182,14 +183,14 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   if (!point.thinking || !point.nextConsideration) return;
   const previous = game.reviewPoints;
   game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
-  try { await persist(); render(); } catch { game.reviewPoints = previous; }
+  try { await persist(); render(); } catch { game.reviewPoints = previous; render(); }
 }
 
 async function addCard(game: Game, point: ReviewPoint | undefined): Promise<void> {
   if (!point || game.cards.some((card) => card.reviewPointId === point.id)) return;
   const card = newCard(point.id);
   game.cards.push(card);
-  try { await persist(); render(); } catch { game.cards = game.cards.filter((item) => item !== card); }
+  try { await persist(); render(); } catch { game.cards = game.cards.filter((item) => item !== card); render(); }
 }
 
 async function persist(): Promise<void> {
@@ -198,7 +199,8 @@ async function persist(): Promise<void> {
 
 function exportData(): void {
   const blob = new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" });
-  const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "shogi-review-backup.json"; link.click(); URL.revokeObjectURL(link.href);
+  const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "shogi-review-backup.json"; link.style.display = "none";
+  document.body.append(link); link.click(); setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
 }
 
 async function restoreFile(event: Event): Promise<void> {
