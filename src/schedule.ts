@@ -14,8 +14,8 @@ export function addDays(date: string, days: number): string {
 }
 
 export function newCard(reviewPointId: string, clock: Clock = utcClock): Card {
-  const today = utcDate(clock.now());
-  return { id: `card-${reviewPointId}`, reviewPointId, interval: 1, dueDate: addDays(today, 1), createdAt: clock.now().toISOString() };
+  const now = clock.now();
+  return { id: `card-${reviewPointId}`, reviewPointId, interval: 1, dueDate: addDays(utcDate(now), 1), createdAt: now.toISOString() };
 }
 
 export function answerCard(card: Card, answer: "again" | "remembered", clock: Clock = utcClock): Card {

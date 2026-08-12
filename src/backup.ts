@@ -15,7 +15,7 @@ export function parseBackup(input: string): AppData {
     throw new Error("不支援的備份版本；需要 schemaVersion: 1。");
   }
   const data = (value as { data?: unknown }).data;
-  if (!data || typeof data !== "object" || !Object.keys(data).every((key) => key === "games") || !Array.isArray((data as { games?: unknown }).games)) {
+  if (!data || typeof data !== "object" || !Array.isArray((data as { games?: unknown }).games)) {
     throw new Error("備份資料結構不完整，未套用任何變更。");
   }
   const gameIds = new Set<string>();

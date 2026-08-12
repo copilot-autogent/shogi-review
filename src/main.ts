@@ -24,7 +24,7 @@ function board(sfen: string): string {
   const boardPart = sfen.split(" ")[0] ?? "";
   const rows = boardPart.split("/");
   if (rows.length !== 9) return `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>`;
-  return `<div class="board" aria-label="將棋盤">${rows.map((row) => {
+  const renderedRows = rows.map((row) => {
     const cells: string[] = [];
     for (let index = 0; index < row.length; index += 1) {
       const char = row[index];
@@ -37,7 +37,9 @@ function board(sfen: string): string {
       }
     }
     return cells.length === 9 ? cells.join("") : "";
-  }).join("")}</div>`;
+  });
+  if (renderedRows.some((row) => !row)) return `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>`;
+  return `<div class="board" aria-label="將棋盤">${renderedRows.join("")}</div>`;
 }
 
 function pieceName(char: string): string {
