@@ -20,7 +20,7 @@ export function decodeRecordBytes(bytes: Uint8Array): string {
 
 export function detectFormat(text: string, fileName = ""): InputFormat {
   const ext = fileName.toLowerCase().split(".").pop();
-  if (ext === "csa" || text.includes("N+" ) || text.includes("N-")) return "CSA";
+  if (ext === "csa" || text.includes("N+") || text.includes("N-")) return "CSA";
   if (ext === "ki2") return "KI2";
   return "KIF";
 }
@@ -28,7 +28,7 @@ export function detectFormat(text: string, fileName = ""): InputFormat {
 function parse(text: string, format: InputFormat): ImmutableRecord {
   const result = format === "CSA" ? importCSA(text) : format === "KI2" ? importKI2(text) : importKIF(text);
   if (result instanceof Error) throw new Error(`無法解析 ${format} 棋譜：${result.message}`);
-  if (!result.moves.length && !result.initialPosition) throw new Error("棋譜沒有可重播的內容。");
+  if (!result.moves.length) throw new Error("棋譜沒有可重播的指し手，無法建立複盤。");
   return result;
 }
 

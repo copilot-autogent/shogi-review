@@ -2,12 +2,10 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { CATEGORIES, type AppData, type Game, type ReviewPoint } from "./model.js";
 import { answerCard, isDue, newCard } from "./schedule.js";
-import { IndexedDbRepository, type Repository } from "./repository.js";
+import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
 import "./style.css";
 
-const repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : {
-  async load() { return { games: [] }; }, async save() { /* fallback for restricted previews */ },
-};
+const repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository();
 let data: AppData = { games: [] };
 let selectedGame: Game | undefined;
 let selectedPly = 0;
@@ -22,14 +20,20 @@ function esc(value: string): string {
 function board(sfen: string): string {
   const boardPart = sfen.split(" ")[0] ?? "";
   const rows = boardPart.split("/");
+  if (rows.length !== 9) return `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>`;
   return `<div class="board" aria-label="將棋盤">${rows.map((row) => {
     const cells: string[] = [];
-    for (const char of row) {
+    for (let index = 0; index < row.length; index += 1) {
+      const char = row[index];
       if (/\d/.test(char)) for (let i = 0; i < Number(char); i += 1) cells.push("<span></span>");
-      else if (char === "+") cells[cells.length - 1] = `<span class="promoted">${cells[cells.length - 1].replace("<span>", "").replace("</span>", "")}+</span>`;
-      else cells.push(`<span class="${char === char.toUpperCase() ? "black" : "white"}">${pieceName(char)}</span>`);
+      else {
+        const promoted = char === "+";
+        const piece = promoted ? row[++index] : char;
+        if (!piece || !/[PLNSGBRKplnsgbrk]/.test(piece)) return "";
+        cells.push(`<span class="${piece === piece.toUpperCase() ? "black" : "white"}${promoted ? " promoted" : ""}">${pieceName(piece)}${promoted ? "成" : ""}</span>`);
+      }
     }
-    return cells.join("");
+    return cells.length === 9 ? cells.join("") : "";
   }).join("")}</div>`;
 }
 
@@ -68,6 +72,9 @@ function renderHome(): void {
   document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (event) => void importFile(event));
   document.querySelector("#export")?.addEventListener("click", exportData);
   document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (event) => void restoreFile(event));
+  document.querySelectorAll<HTMLElement>("[data-open]").forEach((button) => button.addEventListener("click", () => {
+    selectedPly = 0; location.hash = `#/game/${encodeURIComponent(button.dataset.open ?? "")}`;
+  }));
 }
 
 function renderCards(): void {
@@ -78,7 +85,7 @@ function renderCards(): void {
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-answer]").forEach((button) => button.addEventListener("click", () => {
     const cardElement = button.closest<HTMLElement>("[data-card]"); const game = data.games.find((item) => item.id === cardElement?.dataset.game); const card = game?.cards.find((item) => item.id === cardElement?.dataset.card);
-    if (game && card) { Object.assign(card, answerCard(card, button.dataset.answer === "again" ? "again" : "remembered")); void repo.save(data).then(renderCards); }
+    if (game && card) { Object.assign(card, answerCard(card, button.dataset.answer === "again" ? "again" : "remembered")); void persist().then(renderCards); }
   }));
 }
 
@@ -133,7 +140,7 @@ async function addGame(source: string, format: InputFormat, title: string): Prom
   try {
     const game = parseGame(source, format, title);
     const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash);
-    if (!existing) { data.games.push(game); await repo.save(data); }
+    if (!existing) { data.games.push(game); await persist(); }
     location.hash = `#/game/${encodeURIComponent((existing ?? game).id)}`; selectedPly = 0; render();
   } catch (error) { showError(error); }
 }
@@ -156,12 +163,16 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   };
   if (!point.thinking || !point.nextConsideration) return;
   game.reviewPoints = [...game.reviewPoints.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
-  await repo.save(data); render();
+  await persist(); render();
 }
 
 async function addCard(game: Game, point: ReviewPoint | undefined): Promise<void> {
   if (!point || game.cards.some((card) => card.reviewPointId === point.id)) return;
-  game.cards.push(newCard(point.id)); await repo.save(data); render();
+  game.cards.push(newCard(point.id)); await persist(); render();
+}
+
+async function persist(): Promise<void> {
+  try { await repo.save(data); } catch (error) { showError(error); throw error; }
 }
 
 function exportData(): void {
@@ -174,7 +185,8 @@ async function restoreFile(event: Event): Promise<void> {
   try {
     const restored = parseBackup(await file.text());
     if (!window.confirm("這會完整取代目前本機資料，確定要還原嗎？")) return;
-    await repo.save(restored); data = restored; render();
+    const previous = data;
+    try { data = restored; await persist(); render(); } catch (error) { data = previous; throw error; }
   } catch (error) { showError(error); }
 }
 

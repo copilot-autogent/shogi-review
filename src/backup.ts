@@ -1,4 +1,5 @@
 import type { AppData } from "./model.js";
+import { Position } from "tsshogi";
 
 export interface Backup { schemaVersion: 1; exportedAt: string; data: AppData; }
 
@@ -17,11 +18,31 @@ export function parseBackup(input: string): AppData {
     throw new Error("備份資料結構不完整，未套用任何變更。");
   }
   for (const game of (data as { games: unknown[] }).games) {
-    if (!game || typeof game !== "object" || typeof (game as { id?: unknown }).id !== "string" ||
-        !Array.isArray((game as { sfens?: unknown }).sfens) || !Array.isArray((game as { reviewPoints?: unknown }).reviewPoints) ||
-        !Array.isArray((game as { cards?: unknown }).cards)) {
+    if (!isRecord(game) || typeof game.id !== "string" || typeof game.title !== "string" ||
+        !["KIF", "KI2", "CSA"].includes(String(game.sourceFormat)) || typeof game.sourceText !== "string" ||
+        typeof game.initialSfen !== "string" || !Position.isValidSFEN(game.initialSfen) ||
+        !arrayOfStrings(game.sfens) || !arrayOfStrings(game.moves) || typeof game.canonicalHash !== "string" ||
+        typeof game.createdAt !== "string" || !Array.isArray(game.reviewPoints) || !Array.isArray(game.cards) ||
+        !game.sfens.every((sfen) => Position.isValidSFEN(sfen)) ||
+        !game.reviewPoints.every(validReviewPoint) || !game.cards.every(validCard)) {
       throw new Error("備份含有無效棋局，未套用任何變更。");
     }
   }
   return globalThis.structuredClone(data as AppData);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+function arrayOfStrings(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function validReviewPoint(value: unknown): boolean {
+  return isRecord(value) && typeof value.id === "string" && Number.isInteger(value.ply) &&
+    typeof value.sfen === "string" && Position.isValidSFEN(value.sfen) && typeof value.thinking === "string" &&
+    typeof value.nextConsideration === "string" && typeof value.createdAt === "string";
+}
+function validCard(value: unknown): boolean {
+  return isRecord(value) && typeof value.id === "string" && typeof value.reviewPointId === "string" &&
+    typeof value.dueDate === "string" && typeof value.interval === "number" && [1, 3, 7, 14].includes(value.interval) && typeof value.createdAt === "string";
 }
