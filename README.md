@@ -19,3 +19,5 @@ confirmation. Backup schema version 2 stores the corrected invariant that ply 0
 is the initial position and ply N is after N playable moves. Schema 1 backups
 are still structurally and source-validated; backups containing the former
 one-ply offset are rejected with an explicit re-import message.
+IndexedDB records are versioned on the next save; legacy raw records are
+validated as schema 1 on load so correctly structured data remains usable.

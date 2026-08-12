@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBackup, parseBackup } from "./backup.js";
 import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
 import { answerCard, addDays, newCard, type Clock } from "./schedule.js";
-import { MemoryRepository } from "./repository.js";
+import { MemoryRepository, parseStoredData } from "./repository.js";
 
 const kif = `手合割：平手
 先手：A
@@ -88,5 +88,19 @@ describe("durable data and scheduling", () => {
     const data = { games: [parseGame(kif, "KIF")] };
     await repository.save(data);
     expect((await repository.load()).games).toHaveLength(1);
+  });
+  it("validates legacy raw IndexedDB data instead of silently shifting or accepting it", () => {
+    const data = { games: [parseGame(kif, "KIF")] };
+    expect(parseStoredData(data).games[0]?.sfens).toEqual(data.games[0]?.sfens);
+    const game = data.games[0]!;
+    const legacySfens = [game.sfens[0]!, ...game.sfens];
+    expect(() => parseStoredData({
+      games: [{
+        ...game,
+        sfens: legacySfens,
+        moves: ["開始局面", ...game.moves],
+        canonicalHash: fnv1a(`${game.sfens[0]}|${legacySfens.join("|")}`),
+      }],
+    })).toThrow("重新匯入");
   });
 });

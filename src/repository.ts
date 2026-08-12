@@ -8,6 +8,13 @@ export interface Repository {
 
 const empty: AppData = { games: [] };
 
+export function parseStoredData(value: unknown): AppData {
+  if (isRecord(value) && (value.schemaVersion === 1 || value.schemaVersion === 2) && "data" in value) {
+    return parseBackup(JSON.stringify(value));
+  }
+  return parseBackup(JSON.stringify({ schemaVersion: 1, data: value }));
+}
+
 export class MemoryRepository implements Repository {
   constructor(private data: AppData = globalThis.structuredClone(empty)) {}
   async load(): Promise<AppData> { return globalThis.structuredClone(this.data); }
@@ -34,7 +41,7 @@ export class IndexedDbRepository implements Repository {
       request.onsuccess = () => {
         try {
           const value = request.result ?? globalThis.structuredClone(empty);
-          resolve(parseBackup(JSON.stringify({ schemaVersion: 2, data: value })));
+          resolve(parseStoredData(value));
         } catch (error) {
           reject(error instanceof Error ? error : new Error("本機資料格式無效。"));
         }
@@ -46,10 +53,14 @@ export class IndexedDbRepository implements Repository {
     const db = await this.dbPromise;
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction("state", "readwrite");
-      transaction.objectStore("state").put(globalThis.structuredClone(data), "app");
+      transaction.objectStore("state").put({ schemaVersion: 2, data: globalThis.structuredClone(data) }, "app");
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("儲存資料失敗。"));
       transaction.onabort = () => reject(transaction.error ?? new Error("儲存交易已取消。"));
     });
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
