@@ -18,21 +18,25 @@ export function parseBackup(input: string): AppData {
   if (!data || typeof data !== "object" || !Array.isArray((data as { games?: unknown }).games)) {
     throw new Error("備份資料結構不完整，未套用任何變更。");
   }
+  const gameIds = new Set<string>();
   for (const game of (data as { games: unknown[] }).games) {
     if (!isRecord(game) || typeof game.id !== "string" || typeof game.title !== "string" ||
         !["KIF", "KI2", "CSA"].includes(String(game.sourceFormat)) || typeof game.sourceText !== "string" ||
         typeof game.initialSfen !== "string" || !Position.isValidSFEN(game.initialSfen) ||
         !arrayOfStrings(game.sfens) || !arrayOfStrings(game.moves) || typeof game.canonicalHash !== "string" ||
-        typeof game.createdAt !== "string" || !Array.isArray(game.reviewPoints) || !Array.isArray(game.cards) ||
+        typeof game.createdAt !== "string" || gameIds.has(game.id) || !Array.isArray(game.reviewPoints) || !Array.isArray(game.cards) ||
         game.sfens[0] !== game.initialSfen || game.sfens.length !== game.moves.length + 1 ||
         !game.sfens.every((sfen) => Position.isValidSFEN(sfen)) ||
         !game.reviewPoints.every(validReviewPoint) || !game.cards.every(validCard)) {
-      throw new Error("備份含有無效棋局，未套用任何變更。");
+      throw new Error("備份含有無效棋局或重複 ID，未套用任何變更。");
     }
+    gameIds.add(game.id);
     const sfens = game.sfens as string[];
+    const moves = game.moves as string[];
     try {
       const reconstructed = parseGame(game.sourceText, game.sourceFormat as "KIF" | "KI2" | "CSA", game.title);
       if (reconstructed.initialSfen !== game.initialSfen || reconstructed.canonicalHash !== game.canonicalHash ||
+        reconstructed.moves.length !== moves.length || reconstructed.moves.some((move, index) => move !== moves[index]) ||
         reconstructed.sfens.length !== sfens.length || reconstructed.sfens.some((sfen, index) => sfen !== sfens[index])) {
         throw new Error("棋譜與局面快照不一致。");
       }
@@ -75,7 +79,8 @@ function arrayOfStrings(value: unknown): value is string[] {
 function validReviewPoint(value: unknown): boolean {
   return isRecord(value) && typeof value.id === "string" && Number.isInteger(value.ply) &&
     typeof value.sfen === "string" && Position.isValidSFEN(value.sfen) && typeof value.thinking === "string" &&
-    typeof value.nextConsideration === "string" && typeof value.createdAt === "string";
+    typeof value.nextConsideration === "string" && typeof value.createdAt === "string" &&
+    (typeof value.importance === "undefined" || (typeof value.importance === "number" && value.importance >= 1 && value.importance <= 5));
 }
 function validCard(value: unknown): boolean {
   return isRecord(value) && typeof value.id === "string" && typeof value.reviewPointId === "string" &&

@@ -9,6 +9,7 @@ let repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : new M
 let data: AppData = { games: [] };
 let selectedGame: Game | undefined;
 let selectedPly = 0;
+let startupError = "";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
@@ -69,7 +70,7 @@ function renderHome(): void {
       <label>格式<select id="format"><option>KIF</option><option>KI2</option><option>CSA</option></select></label>
       <label>貼上棋譜<textarea id="source" rows="9" placeholder="可直接貼上 KIF、KI2 或 CSA"></textarea></label>
       <div class="actions"><button id="import">載入棋譜</button><label class="file-button">選擇檔案<input id="file" type="file" accept=".kif,.ki2,.csa,.txt" /></label></div>
-      <p id="error" class="error" role="alert"></p></section>
+      <p id="error" class="error" role="alert">${esc(startupError)}</p></section>
       <section class="panel"><h2>我的棋局</h2>${data.games.length ? data.games.map(gameCard).join("") : "<p class='muted'>尚未有棋局。資料只儲存在本機瀏覽器。</p>"}</section>
       <section class="panel"><h2>複習卡</h2><p class="muted">到期卡片：${data.games.reduce((count, game) => count + game.cards.filter((card) => isDue(card)).length, 0)} 張 · 日期採 UTC。</p><a class="button-link" href="#/cards">開始複習</a></section>
       <section class="panel"><h2>備份</h2><p class="muted">備份會保留棋譜、局面、複盤點、卡片與排程；日期採 UTC。</p>
@@ -208,7 +209,7 @@ async function restoreFile(event: Event): Promise<void> {
 
 window.addEventListener("hashchange", render);
 void repo.load().then((loaded) => { data = loaded; render(); }).catch((error) => {
-  showError(error);
+  startupError = `${error instanceof Error ? error.message : "本機儲存空間無法使用"} 本次改用暫存模式，重新整理後不會保留新資料。`;
   repo = new MemoryRepository();
   data = { games: [] };
   render();
