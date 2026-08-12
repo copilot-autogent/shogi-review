@@ -48,7 +48,7 @@ export function parseGame(text: string, format: InputFormat, title = "未命名�
   return {
     id, title: title.trim() || "未命名棋局", sourceFormat: format, sourceText: text,
     initialSfen: sfens[0], sfens, moves, canonicalHash: hash,
-    createdAt: new Date().toISOString(), reviewPoints: [], cards: [],
+    createdAt: new Date().toISOString(), reviewPoints: [],
   };
 }
 

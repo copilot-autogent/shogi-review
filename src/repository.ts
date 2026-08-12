@@ -1,15 +1,11 @@
 import type { AppData } from "./model.js";
-import { parseBackup } from "./backup.js";
+import { parseBackup, createBackup } from "./backup.js";
 
-export interface Repository {
-  load(): Promise<AppData>;
-  save(_data: AppData): Promise<void>;
-}
-
+export interface Repository { load(): Promise<AppData>; save(data: AppData): Promise<void>; }
 const empty: AppData = { games: [] };
 
 export function parseStoredData(value: unknown): AppData {
-  if (isRecord(value) && (value.schemaVersion === 1 || value.schemaVersion === 2) && "data" in value) {
+  if (value && typeof value === "object" && "schemaVersion" in value) {
     return parseBackup(JSON.stringify(value));
   }
   return parseBackup(JSON.stringify({ schemaVersion: 1, data: value }));
@@ -18,17 +14,15 @@ export function parseStoredData(value: unknown): AppData {
 export class MemoryRepository implements Repository {
   constructor(private data: AppData = globalThis.structuredClone(empty)) {}
   async load(): Promise<AppData> { return globalThis.structuredClone(this.data); }
-  async save(_data: AppData): Promise<void> { this.data = globalThis.structuredClone(_data); }
+  async save(data: AppData): Promise<void> { this.data = globalThis.structuredClone(data); }
 }
 
 export class IndexedDbRepository implements Repository {
   private dbPromise: Promise<IDBDatabase>;
   constructor(private name = "shogi-review") {
     this.dbPromise = new Promise((resolve, reject) => {
-      const request = globalThis.indexedDB.open(name, 2);
-      request.onupgradeneeded = () => {
-        if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state");
-      };
+      const request = globalThis.indexedDB.open(name, 3);
+      request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state"); };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error("IndexedDB 開啟失敗。"));
     });
@@ -39,12 +33,8 @@ export class IndexedDbRepository implements Repository {
     return new Promise((resolve, reject) => {
       const request = db.transaction("state").objectStore("state").get("app");
       request.onsuccess = () => {
-        try {
-          const value = request.result ?? globalThis.structuredClone(empty);
-          resolve(parseStoredData(value));
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error("本機資料格式無效。"));
-        }
+        try { resolve(request.result === undefined ? globalThis.structuredClone(empty) : parseStoredData(request.result)); }
+        catch (error) { reject(error instanceof Error ? error : new Error("本機資料格式無效。")); }
       };
       request.onerror = () => reject(request.error ?? new Error("讀取資料失敗。"));
     });
@@ -53,14 +43,10 @@ export class IndexedDbRepository implements Repository {
     const db = await this.dbPromise;
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction("state", "readwrite");
-      transaction.objectStore("state").put({ schemaVersion: 2, data: globalThis.structuredClone(data) }, "app");
+      transaction.objectStore("state").put(createBackup(data), "app");
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("儲存資料失敗。"));
       transaction.onabort = () => reject(transaction.error ?? new Error("儲存交易已取消。"));
     });
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
