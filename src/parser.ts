@@ -1,4 +1,4 @@
-import { importCSA, importKIF, importKI2, type ImmutableRecord } from "tsshogi";
+import { importCSA, importKIF, importKI2, type ImmutableNode, type ImmutableRecord } from "tsshogi";
 import type { Game } from "./model.js";
 
 export type InputFormat = "KIF" | "KI2" | "CSA";
@@ -28,15 +28,20 @@ export function detectFormat(text: string, fileName = ""): InputFormat {
 function parse(text: string, format: InputFormat): ImmutableRecord {
   const result = format === "CSA" ? importCSA(text) : format === "KI2" ? importKI2(text) : importKIF(text);
   if (result instanceof Error) throw new Error(`無法解析 ${format} 棋譜：${result.message}`);
-  if (!result.moves.length) throw new Error("棋譜沒有可重播的指し手，無法建立複盤。");
   return result;
+}
+
+function isPlayableMove(node: ImmutableNode): boolean {
+  return !("type" in node.move);
 }
 
 export function parseGame(text: string, format: InputFormat, title = "未命名棋局"): Game {
   if (!text.trim()) throw new Error("請貼上棋譜或選擇檔案。");
   const record = parse(text, format);
-  const sfens = [record.initialPosition.sfen, ...record.moves.map((node) => node.sfen)];
-  const moves = record.moves.map((node) => node.displayText);
+  const playableMoves = record.moves.filter(isPlayableMove);
+  if (!playableMoves.length) throw new Error("棋譜沒有可重播的指し手，無法建立複盤。");
+  const sfens = [record.initialPosition.sfen, ...playableMoves.map((node) => node.sfen)];
+  const moves = playableMoves.map((node) => node.displayText);
   const canonical = `${sfens[0]}|${sfens.join("|")}`;
   const hash = fnv1a(canonical);
   const id = `game-${hash}`;

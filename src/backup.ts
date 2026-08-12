@@ -2,17 +2,18 @@ import type { AppData } from "./model.js";
 import { Position } from "tsshogi";
 import { parseGame } from "./parser.js";
 
-export interface Backup { schemaVersion: 1; exportedAt: string; data: AppData; }
+export interface Backup { schemaVersion: 2; exportedAt: string; data: AppData; }
 
 export function createBackup(data: AppData, now = new Date()): Backup {
-  return { schemaVersion: 1, exportedAt: now.toISOString(), data: globalThis.structuredClone(data) };
+  return { schemaVersion: 2, exportedAt: now.toISOString(), data: globalThis.structuredClone(data) };
 }
 
 export function parseBackup(input: string): AppData {
   let value: unknown;
   try { value = JSON.parse(input); } catch { throw new Error("備份不是有效的 JSON。"); }
-  if (!value || typeof value !== "object" || (value as { schemaVersion?: unknown }).schemaVersion !== 1) {
-    throw new Error("不支援的備份版本；需要 schemaVersion: 1。");
+  const schemaVersion = value && typeof value === "object" ? (value as { schemaVersion?: unknown }).schemaVersion : undefined;
+  if (schemaVersion !== 1 && schemaVersion !== 2) {
+    throw new Error("不支援的備份版本；需要 schemaVersion: 1 或 2。");
   }
   const data = (value as { data?: unknown }).data;
   if (!data || typeof data !== "object" || !Array.isArray((data as { games?: unknown }).games)) {
@@ -38,7 +39,7 @@ export function parseBackup(input: string): AppData {
       if (reconstructed.initialSfen !== game.initialSfen || reconstructed.canonicalHash !== game.canonicalHash ||
         reconstructed.moves.length !== moves.length || reconstructed.moves.some((move, index) => move !== moves[index]) ||
         reconstructed.sfens.length !== sfens.length || reconstructed.sfens.some((sfen, index) => sfen !== sfens[index])) {
-        throw new Error("棋譜與局面快照不一致。");
+        throw new Error("棋譜與局面快照不一致；可能是舊版一手偏移資料，請重新匯入原始棋譜。");
       }
     } catch (error) {
       throw new Error(`備份棋譜驗證失敗：${error instanceof Error ? error.message : "內容不一致"}。`);

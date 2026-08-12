@@ -18,7 +18,7 @@ export class IndexedDbRepository implements Repository {
   private dbPromise: Promise<IDBDatabase>;
   constructor(private name = "shogi-review") {
     this.dbPromise = new Promise((resolve, reject) => {
-      const request = globalThis.indexedDB.open(name, 1);
+      const request = globalThis.indexedDB.open(name, 2);
       request.onupgradeneeded = () => {
         if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state");
       };
@@ -34,7 +34,7 @@ export class IndexedDbRepository implements Repository {
       request.onsuccess = () => {
         try {
           const value = request.result ?? globalThis.structuredClone(empty);
-          resolve(parseBackup(JSON.stringify({ schemaVersion: 1, data: value })));
+          resolve(parseBackup(JSON.stringify({ schemaVersion: 2, data: value })));
         } catch (error) {
           reject(error instanceof Error ? error : new Error("本機資料格式無效。"));
         }
