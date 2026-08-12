@@ -1,7 +1,7 @@
 import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { CATEGORIES, type AppData, type Game, type ReviewPoint } from "./model.js";
-import { isDue, newCard } from "./schedule.js";
+import { answerCard, isDue, newCard } from "./schedule.js";
 import { IndexedDbRepository, type Repository } from "./repository.js";
 import "./style.css";
 
@@ -43,6 +43,10 @@ function render(): void {
   if (route.startsWith("#/game/")) {
     const id = decodeURIComponent(route.slice(7));
     selectedGame = data.games.find((game) => game.id === id);
+  } else if (route === "#/cards") {
+    selectedGame = undefined;
+    renderCards();
+    return;
   }
   if (!selectedGame) renderHome(); else renderGame(selectedGame);
 }
@@ -57,12 +61,25 @@ function renderHome(): void {
       <div class="actions"><button id="import">載入棋譜</button><label class="file-button">選擇檔案<input id="file" type="file" accept=".kif,.ki2,.csa,.txt" /></label></div>
       <p id="error" class="error" role="alert"></p></section>
       <section class="panel"><h2>我的棋局</h2>${data.games.length ? data.games.map(gameCard).join("") : "<p class='muted'>尚未有棋局。資料只儲存在本機瀏覽器。</p>"}</section>
+      <section class="panel"><h2>複習卡</h2><p class="muted">到期卡片：${data.games.reduce((count, game) => count + game.cards.filter((card) => isDue(card)).length, 0)} 張 · 日期採 UTC。</p><a class="button-link" href="#/cards">開始複習</a></section>
       <section class="panel"><h2>備份</h2><p class="muted">備份會保留棋譜、局面、複盤點、卡片與排程；日期採 UTC。</p>
         <div class="actions"><button id="export">下載完整 JSON</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json" /></label></div></section></main>`;
   document.querySelector("#import")?.addEventListener("click", () => void importText());
   document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (event) => void importFile(event));
   document.querySelector("#export")?.addEventListener("click", exportData);
   document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (event) => void restoreFile(event));
+}
+
+function renderCards(): void {
+  const due = data.games.flatMap((game) => game.cards.filter((card) => isDue(card).valueOf()).map((card) => ({ game, card, point: game.reviewPoints.find((item) => item.id === card.reviewPointId) }))).filter((item) => item.point);
+  app!.innerHTML = `<header><a href="#/">← 我的棋局</a><h1>複習卡</h1><p>先看局面，心中選一手，再揭示自己的記錄。</p></header><main><section class="panel">${due.length ? due.map(({ game, card, point }) => `<article class="card-review" data-card="${card.id}" data-game="${game.id}"><h2>${esc(game.title)} · 第 ${point!.ply} 手</h2>${board(point!.sfen)}<p class="prompt">我當時在想什麼？</p><button class="reveal">揭示記錄</button><div class="answer-content" hidden><p><strong>我的記錄：</strong>${esc(point!.thinking)}</p><p><strong>下次先考慮：</strong>${esc(point!.nextConsideration)}</p>${point!.externalNotes ? `<p><strong>外部筆記：</strong>${esc(point!.externalNotes)}</p>` : ""}<div class="actions"><button data-answer="again">再想一次（1 天）</button><button data-answer="remembered">記住了（下一階段）</button></div></div></article>`).join("") : "<p class='muted'>目前沒有到期卡片。從棋局複盤點加入卡片吧。</p>"}</section></main>`;
+  document.querySelectorAll<HTMLElement>(".reveal").forEach((button) => button.addEventListener("click", () => {
+    const content = button.parentElement?.querySelector<HTMLElement>(".answer-content"); if (content) { content.hidden = false; button.remove(); }
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-answer]").forEach((button) => button.addEventListener("click", () => {
+    const cardElement = button.closest<HTMLElement>("[data-card]"); const game = data.games.find((item) => item.id === cardElement?.dataset.game); const card = game?.cards.find((item) => item.id === cardElement?.dataset.card);
+    if (game && card) { Object.assign(card, answerCard(card, button.dataset.answer === "again" ? "again" : "remembered")); void repo.save(data).then(renderCards); }
+  }));
 }
 
 function gameCard(game: Game): string {
@@ -86,11 +103,15 @@ function renderGame(game: Game): void {
         <label>重要性<input name="importance" type="range" min="1" max="5" value="${point?.importance ?? 3}" /></label>
         <button type="submit">${point ? "更新複盤點" : "儲存複盤點"}</button></form>
         ${point ? `<button class="secondary" id="card">${game.cards.some((card) => card.reviewPointId === point.id) ? "已加入複習卡" : "加入複習卡"}</button>` : ""}
-        <div class="points"><h3>本局複盤點</h3>${game.reviewPoints.map((item) => `<button data-ply="${item.ply}">第 ${item.ply} 手 · ${esc(item.category ?? "未分類")}</button>`).join("") || "<p class='muted'>選擇任意手數開始記錄。</p>"}</div>
+        <div class="points"><h3>本局複盤點</h3><label>篩選分類<select id="point-filter"><option value="">全部</option>${CATEGORIES.map((category) => `<option>${category}</option>`).join("")}</select></label><div id="point-list">${game.reviewPoints.map((item) => `<button data-category="${esc(item.category ?? "")}" data-ply="${item.ply}">第 ${item.ply} 手 · ${esc(item.category ?? "未分類")}</button>`).join("") || "<p class='muted'>選擇任意手數開始記錄。</p>"}</div></div>
       </section></main>`;
   document.querySelector("#prev")?.addEventListener("click", () => { selectedPly -= 1; render(); });
   document.querySelector("#next")?.addEventListener("click", () => { selectedPly += 1; render(); });
   document.querySelectorAll<HTMLElement>("[data-ply]").forEach((element) => element.addEventListener("click", () => { selectedPly = Number(element.dataset.ply); render(); }));
+  document.querySelector<HTMLSelectElement>("#point-filter")?.addEventListener("change", (event) => {
+    const category = (event.target as HTMLSelectElement).value;
+    document.querySelectorAll<HTMLElement>("#point-list [data-category]").forEach((item) => { item.hidden = Boolean(category && item.dataset.category !== category); });
+  });
   document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game));
   document.querySelector("#card")?.addEventListener("click", () => void addCard(game, point));
 }
