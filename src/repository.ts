@@ -18,7 +18,9 @@ export class IndexedDbRepository implements Repository {
   constructor(private name = "shogi-review") {
     this.dbPromise = new Promise((resolve, reject) => {
       const request = globalThis.indexedDB.open(name, 1);
-      request.onupgradeneeded = () => request.result.createObjectStore("state");
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state");
+      };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error("IndexedDB 開啟失敗。"));
     });

@@ -5,7 +5,7 @@ export type InputFormat = "KIF" | "KI2" | "CSA";
 
 export function decodeRecordBytes(bytes: Uint8Array): string {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(3));
+    bytes = bytes.slice(3);
   }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
