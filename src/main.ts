@@ -5,7 +5,9 @@ import { answerCard, isDue, newCard } from "./schedule.js";
 import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
 import "./style.css";
 
-let repo: Repository = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository();
+let repo: Repository;
+try { repo = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository(); }
+catch { repo = new MemoryRepository(); }
 let data: AppData = { games: [] };
 let selectedGame: Game | undefined;
 let selectedPly = 0;

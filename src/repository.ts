@@ -1,4 +1,5 @@
 import type { AppData } from "./model.js";
+import { parseBackup } from "./backup.js";
 
 export interface Repository {
   load(): Promise<AppData>;
@@ -30,7 +31,14 @@ export class IndexedDbRepository implements Repository {
     const db = await this.dbPromise;
     return new Promise((resolve, reject) => {
       const request = db.transaction("state").objectStore("state").get("app");
-      request.onsuccess = () => resolve(request.result ?? globalThis.structuredClone(empty));
+      request.onsuccess = () => {
+        try {
+          const value = request.result ?? globalThis.structuredClone(empty);
+          resolve(parseBackup(JSON.stringify({ schemaVersion: 1, data: value })));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error("本機資料格式無效。"));
+        }
+      };
       request.onerror = () => reject(request.error ?? new Error("讀取資料失敗。"));
     });
   }
