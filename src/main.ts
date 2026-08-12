@@ -183,14 +183,14 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   if (!point.thinking || !point.nextConsideration) return;
   const previous = game.reviewPoints;
   game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
-  try { await persist(); render(); } catch { game.reviewPoints = previous; render(); }
+  try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); }
 }
 
 async function addCard(game: Game, point: ReviewPoint | undefined): Promise<void> {
   if (!point || game.cards.some((card) => card.reviewPointId === point.id)) return;
   const card = newCard(point.id);
   game.cards.push(card);
-  try { await persist(); render(); } catch { game.cards = game.cards.filter((item) => item !== card); render(); }
+  try { await persist(); render(); } catch (error) { game.cards = game.cards.filter((item) => item !== card); render(); showError(error); }
 }
 
 async function persist(): Promise<void> {
