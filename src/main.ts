@@ -202,8 +202,9 @@ async function syncNow(): Promise<void> {
     syncMetadata = readMetadata(user.id);
     const baseline = syncMetadata.ownerUid === user.id && syncMetadata.lastSyncedRevision !== undefined;
     const localChanged = !baseline || localHash !== syncMetadata.lastSyncedPayloadHash;
-    const cloudChanged = !baseline || row?.revision !== syncMetadata.lastSyncedRevision;
+    const cloudChanged = !baseline || !row || row.revision !== syncMetadata.lastSyncedRevision || cloudHash !== syncMetadata.lastSyncedPayloadHash;
     if (row && row.user_id !== user.id) throw new Error("雲端資料屬於另一個帳號，未套用任何變更。");
+    if (baseline && !row) throw new Error("雲端資料已不存在；未自動覆蓋本機資料，請重新同步建立基線。");
     const decision = decideSync({ baseline, local: data, cloud: cloudData, localHash, cloudHash, localChanged, cloudChanged });
     if (decision === "conflict" && cloudData && row) { pendingConflict = { userId: user.id, rowRevision: row.revision, cloudData }; syncStatus = "衝突"; syncMessage = `本機 ${data.games.length} 局、雲端 ${cloudData.games.length} 局；請先備份再選擇。`; render(); return; }
     if (decision === "download-cloud" && cloudData && row) {
@@ -235,21 +236,26 @@ function writeMetadata(userId: string, value: SyncMetadata): void { window.local
 async function resolveConflict(choice: "cloud" | "local"): Promise<void> {
   if (!pendingConflict) return;
   if (!window.confirm(choice === "cloud" ? "先下載一份本機 JSON 後，以驗證過的雲端資料取代本機嗎？" : "先下載一份雲端 JSON 後，以本機資料覆蓋雲端嗎？")) return;
-  const conflict = pendingConflict;
-  if (choice === "cloud") {
-    exportData();
-    await repo.save(conflict.cloudData);
-    data = conflict.cloudData;
-    syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: conflict.rowRevision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
-  } else {
-    exportData();
-    const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, conflict.rowRevision, createBackup(data));
-    syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
+  try {
+    const conflict = pendingConflict;
+    if (choice === "cloud") {
+      exportData();
+      await repo.save(conflict.cloudData);
+      data = conflict.cloudData;
+      syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: conflict.rowRevision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
+    } else {
+      exportData();
+      const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, conflict.rowRevision, createBackup(data));
+      syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
+    }
+    writeMetadata(conflict.userId, syncMetadata);
+    pendingConflict = undefined;
+    syncStatus = "已同步";
+    syncMessage = "";
+  } catch (error) {
+    syncStatus = "離線／同步失敗";
+    syncMessage = error instanceof Error ? error.message : "衝突處理失敗，未套用任何變更。";
   }
-  writeMetadata(conflict.userId, syncMetadata);
-  pendingConflict = undefined;
-  syncStatus = "已同步";
-  syncMessage = "";
   render();
 }
 window.addEventListener("hashchange", render);
