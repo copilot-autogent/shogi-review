@@ -11,6 +11,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.112.2",
     "tsshogi": "^2.3.4"
   },
   "devDependencies": {

@@ -49,4 +49,7 @@ export class IndexedDbRepository implements Repository {
       transaction.onabort = () => reject(transaction.error ?? new Error("儲存交易已取消。"));
     });
   }
+  async replace(data: AppData): Promise<void> {
+    await this.save(data);
+  }
 }
