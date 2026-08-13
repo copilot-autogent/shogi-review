@@ -17,6 +17,7 @@ let renderedRoute = "";
 let syncStatus: SyncStatus = "僅本機";
 let syncMessage = "";
 let syncMetadata: SyncMetadata = { hashVersion: 1 };
+let pendingConflict: { userId: string; rowRevision: number; cloudData: AppData } | undefined;
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
@@ -104,7 +105,7 @@ function renderHome(): void {
     <section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section>
     <section class="panel"><h2>我的棋局</h2>${data.games.length ? data.games.map(gameCard).join("") : "<p class='muted'>尚未有棋局。</p>"}</section>
     <section class="panel"><h2>備份</h2><p class="muted">備份會完整取代目前本機資料。</p><div class="actions"><button id="export">下載 JSON</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div></section>
-    <section class="panel"><h2>雲端同步（手動）</h2><p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><label for="sync-email">登入信箱<input id="sync-email" type="email" autocomplete="email" placeholder="name@example.com"></label><div class="actions"><button id="send-link">寄送登入連結</button><button id="sync-now" class="secondary">手動同步</button><button id="logout" class="secondary">登出</button></div></section></main>`;
+    <section class="panel"><h2>雲端同步（手動）</h2><p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><label for="sync-email">登入信箱<input id="sync-email" type="email" autocomplete="email" placeholder="name@example.com"></label><div class="actions"><button id="send-link">寄送登入連結</button><button id="sync-now" class="secondary">手動同步</button><button id="logout" class="secondary">登出</button></div>${pendingConflict ? `<div class="actions"><button id="use-cloud">使用雲端</button><button id="keep-local" class="secondary">保留這台裝置</button></div>` : ""}</section></main>`;
   document.querySelector("#import")?.addEventListener("click", () => void importText());
   document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (e) => void importFile(e));
   document.querySelector("#export")?.addEventListener("click", exportData);
@@ -112,6 +113,8 @@ function renderHome(): void {
   document.querySelector("#send-link")?.addEventListener("click", () => void sendMagicLink());
   document.querySelector("#sync-now")?.addEventListener("click", () => void syncNow());
   document.querySelector("#logout")?.addEventListener("click", () => void logout());
+  document.querySelector("#use-cloud")?.addEventListener("click", () => void resolveConflict("cloud"));
+  document.querySelector("#keep-local")?.addEventListener("click", () => void resolveConflict("local"));
   document.querySelector("#library")?.addEventListener("change", filterLibrary);
   document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.open ?? "", Number(el.dataset.ply ?? 0)); }));
   document.querySelectorAll<HTMLElement>("[data-download]").forEach((el) => el.addEventListener("click", () => { const game = data.games.find((item) => item.id === el.dataset.download); if (game) downloadKifu(game.sourceText, game.sourceFormat, game.title); }));
@@ -175,6 +178,7 @@ async function restoreFile(event: Event): Promise<void> { const file = (event.ta
 async function sendMagicLink(): Promise<void> {
   const email = document.querySelector<HTMLInputElement>("#sync-email")?.value.trim();
   if (!email) { syncMessage = "請輸入信箱。"; render(); return; }
+  window.localStorage.setItem("shogi-review-pkce-pending", "1");
   const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}${location.pathname}` } });
   syncMessage = error ? `登入連結寄送失敗：${error.message}` : "已寄送，請在同一個瀏覽器開啟連結。";
   render();
@@ -195,12 +199,13 @@ async function syncNow(): Promise<void> {
     const localHash = await payloadHash(data);
     const cloudData = row ? validateCloudPayload(row.payload) : null;
     const cloudHash = cloudData ? await payloadHash(cloudData) : undefined;
+    syncMetadata = readMetadata(user.id);
     const baseline = syncMetadata.ownerUid === user.id && syncMetadata.lastSyncedRevision !== undefined;
     const localChanged = !baseline || localHash !== syncMetadata.lastSyncedPayloadHash;
     const cloudChanged = !baseline || row?.revision !== syncMetadata.lastSyncedRevision;
     if (row && row.user_id !== user.id) throw new Error("雲端資料屬於另一個帳號，未套用任何變更。");
     const decision = decideSync({ baseline, local: data, cloud: cloudData, localHash, cloudHash, localChanged, cloudChanged });
-    if (decision === "conflict") { syncStatus = "衝突"; syncMessage = `本機 ${data.games.length} 局、雲端 ${(cloudData?.games.length ?? 0)} 局；請選擇保留裝置或使用雲端。`; render(); return; }
+    if (decision === "conflict" && cloudData && row) { pendingConflict = { userId: user.id, rowRevision: row.revision, cloudData }; syncStatus = "衝突"; syncMessage = `本機 ${data.games.length} 局、雲端 ${cloudData.games.length} 局；請先備份再選擇。`; render(); return; }
     if (decision === "download-cloud" && cloudData && row) {
       if (!window.confirm("這會以已驗證的雲端資料取代本機資料，確定嗎？")) return;
       await repo.save(cloudData);
@@ -211,6 +216,8 @@ async function syncNow(): Promise<void> {
       const saved = decision === "push-local" && row ? await cloud.casUpdate(user.id, row.revision, createBackup(data)) : await cloud.insert(user.id, createBackup(data), 1);
       syncMetadata = { ownerUid: user.id, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: 1 };
     }
+    writeMetadata(user.id, syncMetadata);
+    pendingConflict = undefined;
     syncStatus = "已同步";
     syncMessage = "";
     render();
@@ -219,6 +226,31 @@ async function syncNow(): Promise<void> {
     syncMessage = error instanceof Error ? error.message : "同步失敗，未套用任何變更。";
     render();
   }
+}
+function readMetadata(userId: string): SyncMetadata {
+  try { return JSON.parse(window.localStorage.getItem(`shogi-review-sync:${userId}`) ?? '{"hashVersion":1}') as SyncMetadata; }
+  catch { return { hashVersion: 1 }; }
+}
+function writeMetadata(userId: string, value: SyncMetadata): void { window.localStorage.setItem(`shogi-review-sync:${userId}`, JSON.stringify(value)); }
+async function resolveConflict(choice: "cloud" | "local"): Promise<void> {
+  if (!pendingConflict) return;
+  if (!window.confirm(choice === "cloud" ? "先下載一份本機 JSON 後，以驗證過的雲端資料取代本機嗎？" : "先下載一份雲端 JSON 後，以本機資料覆蓋雲端嗎？")) return;
+  const conflict = pendingConflict;
+  if (choice === "cloud") {
+    exportData();
+    await repo.save(conflict.cloudData);
+    data = conflict.cloudData;
+    syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: conflict.rowRevision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
+  } else {
+    exportData();
+    const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, conflict.rowRevision, createBackup(data));
+    syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
+  }
+  writeMetadata(conflict.userId, syncMetadata);
+  pendingConflict = undefined;
+  syncStatus = "已同步";
+  syncMessage = "";
+  render();
 }
 window.addEventListener("hashchange", render);
 async function bootstrap(): Promise<void> {

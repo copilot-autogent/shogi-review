@@ -84,9 +84,14 @@ export class SupabaseSyncRepository implements SyncRepository {
 
 export async function finishPkceCallback(client: SupabaseClient = supabase): Promise<string | null> {
   if (!location.search.includes("code=")) return null;
+  if (window.localStorage.getItem("shogi-review-pkce-pending") !== "1") {
+    window.history.replaceState(null, "", location.pathname);
+    return "登入連結缺少本機驗證狀態，請在同一個瀏覽器重新寄送登入連結。";
+  }
   try {
     const { error } = await client.auth.exchangeCodeForSession(new URLSearchParams(location.search).get("code")!);
     if (error) throw error;
+    window.localStorage.removeItem("shogi-review-pkce-pending");
     window.history.replaceState(null, "", `${location.pathname}${location.hash}`);
     return null;
   } catch (error) {

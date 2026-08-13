@@ -11,7 +11,7 @@ export default [
       parser, parserOptions: { project: "./tsconfig.json" },
       globals: {
         window: "readonly", document: "readonly", location: "readonly", crypto: "readonly", indexedDB: "readonly",
-        TextDecoder: "readonly", TextEncoder: "readonly", Blob: "readonly", URL: "readonly", FormData: "readonly", setTimeout: "readonly",
+        TextDecoder: "readonly", TextEncoder: "readonly", Blob: "readonly", URL: "readonly", FormData: "readonly", setTimeout: "readonly", localStorage: "readonly",
       },
     },
     plugins: { "@typescript-eslint": tseslint },
