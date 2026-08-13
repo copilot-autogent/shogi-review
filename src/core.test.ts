@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBackup, parseBackup } from "./backup.js";
 import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
 import { MemoryRepository, parseStoredData } from "./repository.js";
+import { decideSync, payloadHash, validateCloudPayload } from "./sync.js";
 
 const kif = `手合割：平手
 先手：A
@@ -35,6 +36,20 @@ describe("schema v3 data", () => {
     const data = parseBackup(JSON.stringify(createBackup({ games: [game] })));
     expect(data.games[0]?.reviewPoints[0]?.reason).toBe("其他");
     expect(() => parseBackup(JSON.stringify({ schemaVersion: 99, data }))).toThrow("不支援");
+  });
+
+  describe("manual cloud sync safety", () => {
+    it("uses baseline presence before empty-local decisions and distinguishes delete-all", async () => {
+      const game = parseGame(kif, "KIF");
+      const hash = await payloadHash({ games: [game] });
+      expect(decideSync({ baseline: false, local: { games: [] }, cloud: null, localHash: await payloadHash({ games: [] }), localChanged: true, cloudChanged: true })).toBe("initialize-empty");
+      expect(decideSync({ baseline: true, local: { games: [] }, cloud: { games: [game] }, localHash: await payloadHash({ games: [] }), cloudHash: hash, localChanged: true, cloudChanged: false })).toBe("push-local");
+    });
+    it("validates the full migration envelope before use", () => {
+      const game = parseGame(kif, "KIF");
+      expect(validateCloudPayload(createBackup({ games: [game] })).games).toHaveLength(1);
+      expect(() => validateCloudPayload({ schemaVersion: 99 })).toThrow("不支援");
+    });
   });
   it("maps v1 legacy prose and unknown category without loss", () => {
     const game = parseGame(kif, "KIF");
