@@ -130,7 +130,9 @@ export async function finishPkceCallback(
   if (hasError) {
     browser.localStorage.removeItem(PKCE_PENDING_KEY);
     clearCallbackQuery(browser);
-    return "Google 登入已取消，請重試";
+    return params.get("error") === "access_denied"
+      ? "Google 登入已取消，請重試"
+      : `Google 登入失敗：${params.get("error_description") ?? params.get("error") ?? "請重試。"}`;
   }
   if (browser.localStorage.getItem(PKCE_PENDING_KEY) !== "1") {
     browser.localStorage.removeItem(PKCE_PENDING_KEY);

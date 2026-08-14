@@ -179,7 +179,9 @@ async function startGoogleLoginFromUi(): Promise<void> {
   const button = document.querySelector<HTMLButtonElement>("#google-login");
   if (button) { button.disabled = true; button.textContent = "正在前往 Google…"; }
   try {
-    syncMessage = (await startGoogleLogin()) ?? "";
+    const error = await startGoogleLogin();
+    if (!error) return;
+    syncMessage = error;
   } catch (error) {
     syncMessage = error instanceof Error ? `Google 登入啟動失敗：${error.message}` : "Google 登入啟動失敗，請重試。";
   }

@@ -122,6 +122,13 @@ describe("schema v3 data", () => {
       });
       expect(missingResult).toContain("Google 登入缺少本機驗證狀態");
       expect(replaced.at(-1)).toBe("/shogi-review/#/");
+
+      const providerFailure = await finishPkceCallback(client(async () => ({ error: null })), {
+        location: { pathname: "/shogi-review/", search: "?error=server_error&error_description=temporarily_unavailable", hash: "#/" },
+        history: { replaceState: (_: unknown, _title: string, url: string) => replaced.push(url) },
+        localStorage: storage(),
+      });
+      expect(providerFailure).toBe("Google 登入失敗：temporarily_unavailable");
     });
   });
   it("maps v1 legacy prose and unknown category without loss", () => {
