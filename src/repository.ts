@@ -7,6 +7,7 @@ export interface ProfileLoad { data: AppData; profile: ProfileKey; migrated: boo
 export interface ProfileRepository {
   loadProfile(profile: ProfileKey): Promise<ProfileLoad>;
   saveProfile(profile: ProfileKey, data: AppData): Promise<void>;
+  deleteProfile(profile: ProfileKey): Promise<void>;
 }
 const empty: AppData = { games: [] };
 
@@ -32,6 +33,7 @@ export class MemoryProfileRepository implements ProfileRepository {
     return { profile, data: globalThis.structuredClone(this.profiles.get(profile) ?? empty), migrated: false };
   }
   async saveProfile(profile: ProfileKey, data: AppData): Promise<void> { this.profiles.set(profile, globalThis.structuredClone(data)); }
+  async deleteProfile(profile: ProfileKey): Promise<void> { this.profiles.delete(profile); }
 }
 
 export class IndexedDbRepository implements Repository {
@@ -102,6 +104,16 @@ export class IndexedDbRepository implements Repository {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("儲存本機資料失敗。"));
       transaction.onabort = () => reject(transaction.error ?? new Error("本機儲存交易已取消。"));
+    });
+  }
+  async deleteProfile(profile: ProfileKey): Promise<void> {
+    const db = await this.dbPromise;
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction("profiles", "readwrite");
+      transaction.objectStore("profiles").delete(profile);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("刪除本機資料失敗。"));
+      transaction.onabort = () => reject(transaction.error ?? new Error("本機刪除交易已取消。"));
     });
   }
 }

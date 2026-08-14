@@ -17,6 +17,7 @@ export interface SyncMetadata {
   lastSyncedRevision?: number;
   lastSyncedPayloadHash?: string;
   hashVersion: number;
+  lastSyncedAt?: string;
 }
 export interface CloudState {
   user_id: string;

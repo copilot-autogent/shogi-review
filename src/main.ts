@@ -2,12 +2,11 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, REASONS, type AppData, type Game, type IssueTag, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryProfileRepository, type ProfileKey, type ProfileRepository } from "./repository.js";
-import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
 import "./style.css";
 
 let repo: ProfileRepository;
-try { repo = "indexedDB" in window ? new IndexedDbRepository() : new MemoryProfileRepository(); }
-catch { repo = new MemoryProfileRepository(); }
+try { repo = "indexedDB" in window ? new IndexedDbRepository() : new MemoryProfileRepository(); } catch { repo = new MemoryProfileRepository(); }
 let data: AppData = { games: [] };
 let activeProfile: ProfileKey = "guest";
 let activeUser: { id: string; email?: string; user_metadata?: Record<string, unknown> } | null = null;
@@ -22,38 +21,65 @@ let syncStatus: SyncStatus = "僅本機";
 let syncMessage = "";
 let syncMetadata: SyncMetadata = { hashVersion: 1 };
 let pendingConflict: { userId: string; rowRevision: number; cloudData: AppData } | undefined;
+let dialogBusy = false;
+let backupReady = false;
+let dialogReturnFocus: HTMLElement | null = null;
+let pendingGuestImport: { uid: string; guest: AppData } | undefined;
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
 const uid = (prefix: string): string => `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`;
+const statusText = (): string => {
+  if (syncStatus === "已同步") return `已同步 · ${relativeTime(syncMetadata.lastSyncedAt)}`;
+  if (syncStatus === "離線／同步失敗") return "同步失敗 · 重試";
+  if (syncStatus === "衝突") return "需要處理衝突";
+  return syncStatus;
+};
+function relativeTime(value?: string): string {
+  if (!value) return "剛剛";
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
+  if (seconds < 60) return "剛剛";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分鐘前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小時前`;
+  return `${Math.floor(seconds / 86400)} 天前`;
+}
 const autosync = new AutoSyncEngine({
-  identity: () => activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  identity: () => activeUser && !profileLoadFailed && !pendingConflict ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
   save: async (next) => {
-    const profile = activeProfile;
-    const uid = activeUser?.id;
-    const generation = profileGeneration;
+    const profile = activeProfile; const uid = activeUser?.id; const generation = profileGeneration;
     if (!uid || profileLoadFailed) return;
     await repo.saveProfile(profile, next);
-    if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) {
-      data = globalThis.structuredClone(next);
-    }
+    if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) data = globalThis.structuredClone(next);
   },
   getMetadata: (userId) => readMetadata(userId),
   setMetadata: (userId, metadata) => { syncMetadata = metadata; writeMetadata(userId, metadata); },
   cloud: new SupabaseSyncRepository(),
   onConflict: (conflict) => { pendingConflict = conflict; },
-  onStatus: (status, message) => { syncStatus = status; syncMessage = message ?? ""; render(); },
+  onStatus: (status, message) => updateSyncStatus(status, message),
 });
 
+function updateSyncStatus(status: SyncStatus, message = ""): void {
+  syncStatus = status; syncMessage = message;
+  document.querySelectorAll<HTMLElement>("[data-sync-status]").forEach((node) => {
+    node.textContent = `${statusText()}${syncMessage ? `：${syncMessage}` : ""}`;
+  });
+  const retry = document.querySelector<HTMLButtonElement>("[data-sync-retry]");
+  if (retry) retry.hidden = !activeUser || (status !== "離線／同步失敗" && status !== "衝突");
+  const conflict = document.querySelector<HTMLElement>("[data-conflict-action]");
+  if (conflict) conflict.hidden = !pendingConflict;
+}
+function readMetadata(userId: string): SyncMetadata {
+  try { return JSON.parse(window.localStorage.getItem(`shogi-review-sync:${userId}`) ?? '{"hashVersion":1}') as SyncMetadata; }
+  catch { return { hashVersion: 1 }; }
+}
+function writeMetadata(userId: string, value: SyncMetadata): void { window.localStorage.setItem(`shogi-review-sync:${userId}`, JSON.stringify(value)); }
 function pieceName(char: string, promoted: boolean): string {
   const base: Record<string, string> = { P: "歩", L: "香", N: "桂", S: "銀", G: "金", B: "角", R: "飛", K: "玉" };
-  if (!promoted) return base[char.toUpperCase()] ?? char;
-  return ({ P: "と", L: "杏", N: "圭", S: "全", B: "馬", R: "龍" }[char.toUpperCase()] ?? base[char.toUpperCase()] ?? char);
+  return promoted ? ({ P: "と", L: "杏", N: "圭", S: "全", B: "馬", R: "龍" }[char.toUpperCase()] ?? base[char.toUpperCase()] ?? char) : base[char.toUpperCase()] ?? char;
 }
 function hands(sfen: string, side: "gote" | "sente"): string {
-  const hand = sfen.split(" ")[2] ?? "-";
-  const counts = new Map<string, number>(); let multiplier = 0;
+  const hand = sfen.split(" ")[2] ?? "-"; const counts = new Map<string, number>(); let multiplier = 0;
   for (const char of hand) {
     if (/\d/.test(char)) { multiplier = multiplier * 10 + Number(char); continue; }
     const isGote = char === char.toLowerCase();
@@ -69,326 +95,142 @@ function board(sfen: string): string {
     const out: string[] = [];
     for (let i = 0; i < row.length; i += 1) {
       const char = row[i]!;
-      if (/\d/.test(char)) { for (let n = 0; n < Number(char); n += 1) out.push("<span class=\"square\"></span>"); }
-      else {
-        const promoted = char === "+";
-        const piece = promoted ? row[++i] : char;
-        if (!piece || !/[PLNSGBRKplnsgbrk]/.test(piece)) return "";
-        const owner = piece === piece.toUpperCase() ? "sente" : "gote";
-        out.push(`<span class="square piece ${owner}">${pieceName(piece, promoted)}</span>`);
-      }
+      if (/\d/.test(char)) for (let n = 0; n < Number(char); n += 1) out.push("<span class=\"square\"></span>");
+      else { const promoted = char === "+"; const piece = promoted ? row[++i] : char; if (!piece || !/[PLNSGBRKplnsgbrk]/.test(piece)) return ""; out.push(`<span class="square piece ${piece === piece.toUpperCase() ? "sente" : "gote"}">${pieceName(piece, promoted)}</span>`); }
     }
     return out.length === 9 ? out.join("") : "";
   });
-  if (cells.some((row) => !row)) return `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>`;
-  return `<div class="position"><div class="hand gote" aria-label="後手持駒">${hands(sfen, "gote")}</div><div class="board" aria-label="將棋盤">${cells.join("")}</div><div class="hand sente" aria-label="先手持駒">${hands(sfen, "sente")}</div></div>`;
+  return cells.some((row) => !row) ? `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>` : `<div class="position"><div class="hand gote" aria-label="後手持駒">${hands(sfen, "gote")}</div><div class="board" aria-label="將棋盤">${cells.join("")}</div><div class="hand sente" aria-label="先手持駒">${hands(sfen, "sente")}</div></div>`;
 }
 function optionList(values: readonly string[], selected: string): string { return values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(value)}</option>`).join(""); }
 function tagChecks(selected: IssueTag[]): string { return ISSUE_TAGS.map((tag) => `<label class="check"><input type="checkbox" name="issueTags" value="${esc(tag)}" ${selected.includes(tag) ? "checked" : ""}>${esc(tag)}</label>`).join(""); }
-function gameHash(gameId: string, ply: number, rethink = false): string {
-  return `#/game/${encodeURIComponent(gameId)}?ply=${ply}${rethink ? "&rethink=1" : ""}`;
+function gameHash(gameId: string, ply: number, rethink = false): string { return `#/game/${encodeURIComponent(gameId)}?ply=${ply}${rethink ? "&rethink=1" : ""}`; }
+function setPly(ply: number): void { if (selectedGame) location.hash = gameHash(selectedGame.id, Math.max(0, Math.min(ply, selectedGame.moves.length)), rethinkMode); }
+function resetScroll(): void { if (typeof window.scrollTo === "function") window.scrollTo({ top: 0, left: 0, behavior: "auto" }); }
+function header(): string {
+  const account = activeUser
+    ? `<div class="account"><span class="avatar">${esc(initials())}</span><span><strong>${esc(activeUser.email ?? "已登入")}</strong><span class="sync-copy" data-sync-status role="status" aria-live="polite">${esc(statusText())}</span></span><button class="secondary" data-conflict-action hidden>處理衝突</button><a href="#/settings">設定</a></div>`
+    : `<div class="account"><strong>訪客模式</strong><a class="button-link" href="#/login" data-login>使用 Google 登入</a></div>`;
+  return `<header><div class="header-inner"><a class="brand" href="#/"><strong>將棋複盤室</strong><span>把每局變成下一次的線索</span></a>${account}</div></header>`;
 }
-function setPly(ply: number): void {
-  if (!selectedGame) return;
-  const nextPly = Math.max(0, Math.min(ply, selectedGame.moves.length));
-  location.hash = gameHash(selectedGame.id, nextPly, rethinkMode);
-}
-function resetScroll(): void {
-  if (typeof window.scrollTo === "function") window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-}
-
+function initials(): string { return (activeUser?.user_metadata?.full_name as string | undefined)?.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || (activeUser?.email?.[0] ?? "棋").toUpperCase(); }
 function render(): void {
-  const route = location.hash;
+  const route = location.hash || "#/";
   if (route.startsWith("#/game/")) {
-    const [rawId, query = ""] = route.slice(7).split("?");
-    let id = "";
+    const [rawId, query = ""] = route.slice(7).split("?"); let id = "";
     try { id = decodeURIComponent(rawId ?? ""); } catch { location.hash = "#/"; return; }
-    const params = new URLSearchParams(query);
-    const requestedPly = Number(params.get("ply"));
-    selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1";
-    selectedGame = data.games.find((game) => game.id === id);
-    if (!selectedGame) location.hash = "#/";
-    else {
-      selectedPly = Math.min(selectedPly, selectedGame.moves.length);
-      const routeKey = `#/game/${rawId}`;
-      if (routeKey !== renderedRoute) resetScroll();
-      renderedRoute = routeKey;
-      renderGame(selectedGame);
-      return;
-    }
+    const params = new URLSearchParams(query); const requestedPly = Number(params.get("ply"));
+    selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1"; selectedGame = data.games.find((game) => game.id === id);
+    if (!selectedGame) { location.hash = "#/"; return; }
+    if (renderedRoute !== `#/game/${rawId}`) resetScroll(); renderedRoute = `#/game/${rawId}`; renderGame(selectedGame); return;
   }
-  if (renderedRoute !== "#/") resetScroll();
-  renderedRoute = "#/";
-  renderHome();
+  if (renderedRoute !== route) resetScroll(); renderedRoute = route;
+  if (route === "#/settings") renderSettings();
+  else if (route === "#/games") renderGames();
+  else renderHome();
 }
 function renderHome(): void {
-  selectedGame = undefined;
-  app!.innerHTML = `<header><h1>將棋複盤室</h1><p>把棋譜變成可重複使用的複盤局面。</p></header><main class="home">
-    <section class="panel import"><h2>匯入棋譜</h2><label>棋局名稱<input id="title" placeholder="例如：2026-08-12 對局"></label><label>格式<select id="format"><option>KIF</option><option>KI2</option><option>CSA</option></select></label><label>貼上棋譜<textarea id="source" rows="9"></textarea></label><div class="actions"><button id="import">載入棋譜</button><label class="file-button">選擇檔案<input id="file" type="file" accept=".kif,.ki2,.csa,.txt"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section>
-    <section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section>
-    <section class="panel"><h2>我的棋局</h2>${data.games.length ? data.games.map(gameCard).join("") : "<p class='muted'>尚未有棋局。</p>"}</section>
-    <section class="panel"><h2>備份</h2><p class="muted">備份會完整取代目前本機資料。</p><div class="actions"><button id="export">下載 JSON</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div></section>
-    <section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>Google：${esc(activeUser.email ?? activeUser.id)}</strong></p><p>此帳號本機棋局：${data.games.length} 局</p>` : `<p>本機訪客資料：${data.games.length} 局</p><p class="muted">登出時只會顯示訪客資料；帳號資料仍保留在本機但不會暴露。</p>`}<p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><div class="actions">${!activeUser ? `<button id="google-login">使用 Google 登入</button>` : `<button id="logout" class="secondary">登出</button>`}<button id="sync-now" class="secondary" ${!activeUser || profileLoadFailed ? "disabled" : ""}>立即同步</button></div>${pendingConflict ? `<div class="actions"><button id="use-cloud">使用雲端</button><button id="keep-local" class="secondary">保留這台裝置</button></div>` : ""}</section></main>`;
-  document.querySelector("#import")?.addEventListener("click", () => void importText());
-  document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (e) => void importFile(e));
-  document.querySelector("#export")?.addEventListener("click", exportData);
-  document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e));
-  document.querySelector("#google-login")?.addEventListener("click", () => void startGoogleLoginFromUi());
-  document.querySelector("#sync-now")?.addEventListener("click", () => void syncNow());
-  document.querySelector("#logout")?.addEventListener("click", () => void logout());
-  document.querySelector("#use-cloud")?.addEventListener("click", () => void resolveConflict("cloud"));
-  document.querySelector("#keep-local")?.addEventListener("click", () => void resolveConflict("local"));
-  document.querySelector("#library")?.addEventListener("change", filterLibrary);
-  document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.open ?? "", Number(el.dataset.ply ?? 0)); }));
+  selectedGame = undefined; const recent = [...data.games].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 5);
+  app!.innerHTML = `${header()}<main class="home"><section class="panel recent"><div class="section-heading"><h1>最近棋局</h1><a href="#/games">查看全部</a></div>${recent.length ? recent.map(gameCard).join("") : `<div class="empty"><h2>從一局開始</h2><p>匯入棋譜 → 標記局面 → 重新思考</p></div>`}</section><section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section><section class="panel import"><details id="import-panel"><summary><strong>匯入棋譜</strong><span>新增一局棋譜，開始標記值得回看的局面</span></summary><div class="import-form"><label>棋局名稱<input id="title" placeholder="例如：2026-08-12 對局"></label><label>格式<select id="format"><option>KIF</option><option>KI2</option><option>CSA</option></select></label><label>貼上棋譜<textarea id="source" rows="9"></textarea></label><div class="actions"><button id="import">載入棋譜</button><label class="file-button">選擇檔案<input id="file" type="file" accept=".kif,.ki2,.csa,.txt"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></div></details></section></main>`;
+  bindCommon(); document.querySelector("#import")?.addEventListener("click", () => void importText()); document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (e) => void importFile(e));
+  document.querySelector("#library")?.addEventListener("change", filterLibrary); document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.open ?? "", Number(el.dataset.ply ?? 0)); }));
   document.querySelectorAll<HTMLElement>("[data-download]").forEach((el) => el.addEventListener("click", () => { const game = data.games.find((item) => item.id === el.dataset.download); if (game) downloadKifu(game.sourceText, game.sourceFormat, game.title); }));
-  document.querySelectorAll<HTMLElement>("[data-edit]").forEach((el) => el.addEventListener("click", () => editPoint(el.dataset.edit!)));
-  document.querySelectorAll<HTMLElement>("[data-delete]").forEach((el) => el.addEventListener("click", () => void deletePoint(el.dataset.delete!)));
-  document.querySelectorAll<HTMLElement>("[data-rethink]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.rethink ?? "", Number(el.dataset.ply ?? 0), true); }));
+}
+function gameCard(game: Game): string { return `<article class="game-card"><div><h2>${esc(game.title)}</h2><p class="muted">${game.sourceFormat} · ${game.moves.length} 手 · ${game.reviewPoints.length} 個複盤局面</p></div><div class="actions"><button data-open="${esc(game.id)}" data-ply="0">開啟</button><button class="secondary" data-download="${esc(game.id)}">下載棋譜</button></div></article>`; }
+function renderGames(): void {
+  selectedGame = undefined; app!.innerHTML = `${header()}<main><div class="section-heading"><div><a href="#/">← 首頁</a><h1>所有棋局</h1></div><a class="button-link" href="#/import">匯入棋譜</a></div><section class="panel">${data.games.length ? data.games.slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).map(gameCard).join("") : `<div class="empty"><h2>還沒有棋局</h2><p>匯入一份棋譜，開始你的複盤。</p></div>`}</section></main>`; bindCommon(); document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.open ?? "", 0); })); document.querySelectorAll<HTMLElement>("[data-download]").forEach((el) => el.addEventListener("click", () => { const game = data.games.find((item) => item.id === el.dataset.download); if (game) downloadKifu(game.sourceText, game.sourceFormat, game.title); }));
 }
 function renderLibrary(): string {
   const points = data.games.flatMap((game) => game.reviewPoints.map((point) => ({ game, point })));
-  return `<div id="library"><div class="filters"><label>棋局<select name="game"><option value="">全部</option>${data.games.map((game) => `<option value="${esc(game.id)}">${esc(game.title)}</option>`).join("")}</select></label><label>原因<select name="reason"><option value="">全部</option>${optionList(REASONS, "")}</select></label><fieldset><legend>問題標籤</legend>${tagChecks([])}</fieldset></div><div id="library-list">${points.length ? points.map(({ game, point }) => libraryItem(game, point)).join("") : "<p class='muted'>儲存第一個複盤局面後，它會出現在這裡。</p>"}</div></div>`;
+  return `<div id="library"><div class="filters"><label>棋局<select name="game"><option value="">全部</option>${data.games.map((game) => `<option value="${esc(game.id)}">${esc(game.title)}</option>`).join("")}</select></label><label>原因<select name="reason"><option value="">全部</option>${optionList(REASONS, "")}</select></label><fieldset><legend>問題標籤</legend>${tagChecks([])}</fieldset></div><div id="library-list">${points.length ? points.map(({ game, point }) => `<article class="library-item" data-game="${esc(game.id)}" data-reason="${esc(point.reason)}" data-tags="${esc(point.issueTags.join("|"))}"><h3>${esc(game.title)} · 第 ${point.ply} 手</h3><p>${esc(point.reason)}${point.issueTags.length ? ` · ${point.issueTags.map(esc).join("、")}` : ""}</p><div class="actions"><button data-open="${esc(game.id)}" data-ply="${point.ply}">開啟局面</button><button data-rethink="${esc(game.id)}" data-ply="${point.ply}">重新思考</button><button class="secondary" data-edit="${esc(point.id)}">編輯</button><button class="danger" data-delete="${esc(point.id)}">刪除</button></div></article>`).join("") : "<p class='muted'>儲存第一個複盤局面後，它會出現在這裡。</p>"}</div></div>`;
 }
-function libraryItem(game: Game, point: ReviewPoint): string {
-  return `<article class="library-item" data-game="${esc(game.id)}" data-reason="${esc(point.reason)}" data-tags="${esc(point.issueTags.join("|"))}"><h3>${esc(game.title)} · 第 ${point.ply} 手</h3><p>${esc(point.reason)}${point.issueTags.length ? ` · ${point.issueTags.map(esc).join("、")}` : ""}</p><div class="actions"><button data-open="${esc(game.id)}" data-ply="${point.ply}">開啟局面</button><button data-rethink="${esc(game.id)}" data-ply="${point.ply}">重新思考</button><button class="secondary" data-edit="${esc(point.id)}">編輯</button><button class="danger" data-delete="${esc(point.id)}">刪除</button></div></article>`;
-}
-function filterLibrary(): void {
-  const root = document.querySelector("#library"); if (!root) return;
-  const game = (root.querySelector('[name="game"]') as HTMLSelectElement).value;
-  const reason = (root.querySelector('[name="reason"]') as HTMLSelectElement).value;
-  const tags = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="issueTags"]:checked')).map((input) => input.value);
-  root.querySelectorAll<HTMLElement>(".library-item").forEach((item) => {
-    const visible = (!game || item.dataset.game === game) && (!reason || item.dataset.reason === reason) && (!tags.length || tags.some((tag) => (item.dataset.tags ?? "").split("|").includes(tag)));
-    item.style.display = visible ? "" : "none";
-  });
-}
-function gameCard(game: Game): string { return `<article class="game-card"><div><h3>${esc(game.title)}</h3><p>${game.sourceFormat} · ${game.moves.length} 手 · ${game.reviewPoints.length} 個複盤局面</p></div><div class="actions"><button data-open="${esc(game.id)}" data-ply="0">開啟</button><button class="secondary" data-download="${esc(game.id)}">下載原始棋譜</button></div></article>`; }
 function renderGame(game: Game): void {
-  const sfen = game.sfens[selectedPly] ?? game.initialSfen;
-  const point = game.reviewPoints.find((item) => item.ply === selectedPly);
-  const rethink = rethinkMode && point ? `<section class="rethink panel"><h2>重新思考</h2>${board(point.sfen)}<p class="prompt">如果再遇到這個局面，你會先注意什麼？</p><button id="reveal">揭示記錄</button><div id="reveal-content" hidden><p><strong>原因：</strong>${esc(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(esc).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次注意：</strong>${esc(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${esc(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${esc(point.legacyNotes)}</p></details>` : ""}</div></section>` : "";
-  app!.innerHTML = `<header><a href="#/">← 首頁</a><h1>${esc(game.title)}</h1><p>${game.sourceFormat} · ${game.moves.length} 手</p></header><main class="review-layout"><section class="panel replay">${board(sfen)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol><button class="secondary" id="download-kifu">下載原始棋譜</button></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label for="reason"><span>為什麼標記這裡？ <strong>必填</strong></span></label><select id="reason" name="reason" required>${`<option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>`}${optionList(REASONS, point?.reason ?? "")}</select><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label for="note"><span>下次要注意什麼？</span></label><textarea id="note" name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><label for="external-notes">外部分析筆記</label><textarea id="external-notes" name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details>${point?.legacyNotes ? `<details open><summary>舊版筆記</summary><textarea name="legacyNotes" readonly>${esc(point.legacyNotes)}</textarea></details>` : ""}<button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`;
-  document.querySelector("#prev")?.addEventListener("click", () => setPly(selectedPly - 1));
-  document.querySelector("#next")?.addEventListener("click", () => setPly(selectedPly + 1));
-  document.querySelectorAll<HTMLElement>("[data-ply]").forEach((el) => el.addEventListener("click", () => setPly(Number(el.dataset.ply))));
-  document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game));
-  document.querySelector("#download-kifu")?.addEventListener("click", () => downloadKifu(game.sourceText, game.sourceFormat, game.title));
-  document.querySelector("#reveal")?.addEventListener("click", () => { const content = document.querySelector<HTMLElement>("#reveal-content"); if (content) { content.hidden = false; (document.querySelector("#reveal") as HTMLButtonElement).remove(); } });
+  const sfen = game.sfens[selectedPly] ?? game.initialSfen; const point = game.reviewPoints.find((item) => item.ply === selectedPly);
+  const rethink = rethinkMode && point ? `<section class="rethink panel"><h2>重新思考</h2>${board(point.sfen)}<p>如果再遇到這個局面，你會先注意什麼？</p><button id="reveal">揭示記錄</button><div id="reveal-content" hidden><p><strong>原因：</strong>${esc(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(esc).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次注意：</strong>${esc(point.note)}</p>` : ""}</div></section>` : "";
+  app!.innerHTML = `${header()}<main class="review-layout"><section class="panel replay"><div class="game-header"><a href="#/games">← 棋局</a><h1>${esc(game.title)}</h1><button class="secondary" data-rename="${esc(game.id)}">改名</button><button class="danger" data-game-delete="${esc(game.id)}">刪除</button></div>${board(sfen)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol><button class="secondary" id="download-kifu">下載原始棋譜</button></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label for="reason">為什麼標記這裡？ <strong>必填</strong></label><select id="reason" name="reason" required><option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>${optionList(REASONS, point?.reason ?? "")}</select><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label for="note">下次要注意什麼？</label><textarea id="note" name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><textarea id="external-notes" name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details><button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`; bindCommon();
+  document.querySelector("#prev")?.addEventListener("click", () => setPly(selectedPly - 1)); document.querySelector("#next")?.addEventListener("click", () => setPly(selectedPly + 1)); document.querySelectorAll<HTMLElement>("[data-ply]").forEach((el) => el.addEventListener("click", () => setPly(Number(el.dataset.ply))));
+  document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game)); document.querySelector("#download-kifu")?.addEventListener("click", () => downloadKifu(game.sourceText, game.sourceFormat, game.title)); document.querySelector("#reveal")?.addEventListener("click", () => { const content = document.querySelector<HTMLElement>("#reveal-content"); if (content) { content.hidden = false; document.querySelector("#reveal")?.remove(); } });
 }
-function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
+function renderSettings(): void {
+  selectedGame = undefined; const count = data.games.length; app!.innerHTML = `${header()}<main><a href="#/">← 首頁</a><h1>設定</h1><div class="settings-grid"><section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>${esc(activeUser.email ?? "Google 帳號")}</strong></p><p>此裝置資料：${count} 局</p><p data-sync-status role="status" aria-live="polite">${esc(statusText())}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><button data-sync-retry ${syncStatus === "已同步" ? "hidden" : ""}>${syncStatus === "衝突" ? "處理衝突" : "立即同步"}</button><button id="logout-remove" class="danger">登出並移除此裝置的帳號資料</button>` : `<p>訪客資料只保存在此裝置。</p><button data-login>使用 Google 登入</button><button id="clear-guest" class="danger" ${count ? "" : "disabled"}>清除訪客資料</button>`}</section><section class="panel"><h2>備份與還原</h2><p>資料先保存在此裝置；登入後會安全同步至你的私人雲端。</p><div class="actions"><button id="export">下載備份</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section></div></main>`; bindCommon(); document.querySelector("#export")?.addEventListener("click", () => { generateBackup(); }); document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e)); document.querySelector("#clear-guest")?.addEventListener("click", () => openDestructive("clear-guest")); document.querySelector("#logout-remove")?.addEventListener("click", () => openDestructive("remove-profile")); document.querySelector("[data-sync-retry]")?.addEventListener("click", () => { if (pendingConflict) openDestructive("conflict"); else void syncNow(); });
+}
+function bindCommon(): void {
+  document.querySelectorAll<HTMLElement>("[data-login]").forEach((el) => el.addEventListener("click", (event) => { event.preventDefault(); void startGoogleLoginFromUi(); }));
+  document.querySelectorAll<HTMLElement>("[data-conflict-action]").forEach((el) => el.addEventListener("click", () => openDestructive("conflict")));
+  document.querySelectorAll<HTMLElement>("[data-delete]").forEach((el) => el.addEventListener("click", () => openDestructive("delete-point", el.dataset.delete)));
+  document.querySelectorAll<HTMLElement>("[data-rethink]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.rethink ?? "", Number(el.dataset.ply ?? 0), true); }));
+  document.querySelectorAll<HTMLElement>("[data-rename]").forEach((el) => el.addEventListener("click", () => openDestructive("rename-game", el.dataset.rename)));
+  document.querySelectorAll<HTMLElement>("[data-game-delete]").forEach((el) => el.addEventListener("click", () => openDestructive("delete-game", el.dataset.gameDelete)));
+  updateSyncStatus(syncStatus, syncMessage);
+}
+function openDestructive(kind: "delete-point" | "delete-game" | "rename-game" | "clear-guest" | "remove-profile" | "conflict" | "guest-import", id?: string): void {
+  dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; backupReady = false;
+  const game = id ? data.games.find((item) => item.id === id) : undefined; const pointGame = kind === "delete-point" ? data.games.find((item) => item.reviewPoints.some((point) => point.id === id)) : undefined;
+  const title = kind === "rename-game" ? "重新命名棋局" : kind === "delete-point" ? "刪除複盤局面？" : kind === "delete-game" ? "刪除整局棋？" : kind === "clear-guest" ? "清除訪客資料？" : kind === "remove-profile" ? "移除此裝置的帳號資料？" : kind === "guest-import" ? "保留訪客資料？" : "處理同步衝突";
+  const body = kind === "rename-game" ? `<label for="dialog-input">棋局名稱<input id="dialog-input" value="${esc(game?.title ?? "")}" required></label>` : kind === "delete-point" ? `<p>這會刪除「${esc(pointGame?.title ?? "")}」中的 1 個複盤局面。棋局與其他局面不受影響。</p>` : kind === "delete-game" ? `<p>這會一次刪除棋局與其中 ${game?.reviewPoints.length ?? 0} 個複盤局面，且無法復原。</p>` : kind === "clear-guest" ? `<p>清除訪客資料只影響此裝置，不會影響雲端。請先下載 JSON 備份。</p>${backupGate()}` : kind === "remove-profile" ? `<p>這只會移除本裝置的帳號資料，不會刪除雲端帳號。若尚未同步，未同步變更會從此裝置移除。</p>${backupGate()}<label class="check"><input id="ack" type="checkbox">我了解未同步變更只會保留在備份，雲端不會被刪除。</label>` : kind === "guest-import" ? `<p>本機訪客：${data.games.length} 局、${data.games.reduce((n, game) => n + game.reviewPoints.length, 0)} 個複盤局面。帳號雲端：0 局。</p><p>訪客資料會永遠保留在此裝置。</p><div class="actions"><button type="button" data-guest-copy>複製訪客資料</button><button type="button" class="secondary" data-guest-skip>略過，使用帳號雲端</button></div>` : `<p>本機 ${data.games.length} 局，雲端 ${pendingConflict?.cloudData.games.length ?? 0} 局。同步已暫停，請選擇要保留哪一份。</p><p class="warning">保留雲端會捨棄目前本機變更；保留本機會以目前本機資料更新雲端。處理前請先下載本機 JSON。</p>${backupGate()}<label class="check"><input id="winner-cloud" type="radio" name="winner">使用雲端資料</label><label class="check"><input id="winner-local" type="radio" name="winner">保留本機資料</label>`;
+  const action = kind === "rename-game" ? "儲存名稱" : kind === "delete-point" || kind === "delete-game" || kind === "clear-guest" || kind === "remove-profile" ? "確認" : "套用選擇";
+  app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">${title}</h2><div>${body}</div><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button>${kind !== "guest-import" ? `<button data-dialog-submit ${kind === "conflict" || kind === "clear-guest" || kind === "remove-profile" ? "disabled" : ""}>${action}</button>` : ""}</div></section></div>`);
+  const dialog = document.querySelector<HTMLElement>("[data-dialog] .dialog"); dialog?.focus(); document.body.classList.add("dialog-lock");
+  document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", () => void submitDialog(kind, id));
+  document.querySelector("[data-guest-copy]")?.addEventListener("click", () => void copyGuestData());
+  document.querySelector("[data-guest-skip]")?.addEventListener("click", () => closeDialog());
+  document.querySelector("[data-dialog]")?.addEventListener("keydown", (event) => dialogKeydown(event as KeyboardEvent)); document.querySelectorAll("[data-dialog] input").forEach((input) => input.addEventListener("input", updateDialogGate)); updateDialogGate();
+}
+function backupGate(): string { return `<div class="backup-gate"><button type="button" data-dialog-backup>先下載本機 JSON 備份</button><label class="check"><input id="backup-ack" type="checkbox" disabled>我已保存備份</label></div>`; }
+function updateDialogGate(): void {
+  const backupAck = document.querySelector<HTMLInputElement>("#backup-ack"); const ack = document.querySelector<HTMLInputElement>("#ack"); const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]");
+  if (document.querySelector("[data-dialog-backup]")) document.querySelector("[data-dialog-backup]")?.addEventListener("click", () => { backupReady = generateBackup(); const checkbox = document.querySelector<HTMLInputElement>("#backup-ack"); if (checkbox) checkbox.disabled = !backupReady; updateDialogGate(); });
+  if (backupAck && !backupAck.checked) { if (submit) submit.disabled = true; } else if (ack && !ack.checked) { if (submit) submit.disabled = true; } else if (submit && !dialogBusy) submit.disabled = false;
+}
+function dialogKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && !dialogBusy) { closeDialog(); return; }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(document.querySelectorAll<HTMLElement>("[data-dialog] button:not([disabled]), [data-dialog] input:not([disabled])")); if (!focusable.length) return;
+  const index = focusable.indexOf(document.activeElement as HTMLElement); const next = focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length]; event.preventDefault(); next?.focus();
+}
+function closeDialog(): void { if (dialogBusy) return; document.querySelector("[data-dialog]")?.remove(); document.body.classList.remove("dialog-lock"); dialogReturnFocus?.focus(); dialogReturnFocus = null; }
+async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: string): Promise<void> {
+  if (dialogBusy) return; const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]"); dialogBusy = true; if (submit) submit.disabled = true;
+  try {
+    if (kind === "rename-game") { const game = data.games.find((item) => item.id === id); const title = document.querySelector<HTMLInputElement>("#dialog-input")?.value.trim() ?? ""; if (!game || !title) throw new Error("棋局名稱不可為空白。"); const previous = game.title; game.title = title; try { await persist(); } catch (error) { game.title = previous; throw error; } }
+    if (kind === "delete-point") await deletePoint(id);
+    if (kind === "delete-game") await deleteGame(id);
+    if (kind === "clear-guest") { await repo.deleteProfile("guest"); data = { games: [] }; }
+    if (kind === "remove-profile") await removeLocalAccount();
+    if (kind === "guest-import") return;
+    if (kind === "conflict") { const winner = document.querySelector<HTMLInputElement>("#winner-cloud")?.checked ? "cloud" : document.querySelector<HTMLInputElement>("#winner-local")?.checked ? "local" : ""; if (!winner || !backupReady) throw new Error("請先備份並選擇資料來源。"); await resolveConflict(winner); }
+    closeDialog(); render();
+  } catch (error) { dialogBusy = false; if (submit) submit.disabled = false; showError(error); }
+}
+function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
 async function importText(): Promise<void> { try { await addGame(document.querySelector<HTMLTextAreaElement>("#source")?.value ?? "", document.querySelector<HTMLSelectElement>("#format")?.value as InputFormat, document.querySelector<HTMLInputElement>("#title")?.value ?? ""); } catch (error) { showError(error); } }
 async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const source = decodeRecordBytes(new Uint8Array(await file.arrayBuffer())); await addGame(source, detectFormat(source, file.name), file.name); } catch (error) { showError(error); } }
-async function addGame(source: string, format: InputFormat, title: string): Promise<void> {
-  const game = parseGame(source, format, title); const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash);
-  if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } }
-  location.hash = gameHash((existing ?? game).id, 0); render();
-}
-async function savePoint(event: Event, game: Game): Promise<void> {
-  const form = event.currentTarget as HTMLFormElement;
-  if (!form.reportValidity()) return;
-  event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? "");
-  if (!REASONS.includes(reason as Reason)) { form.reportValidity(); return; }
-  const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() };
-  const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
-  try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); }
-}
+async function addGame(source: string, format: InputFormat, title: string): Promise<void> { const game = parseGame(source, format, title); const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash); if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } } location.hash = gameHash((existing ?? game).id, 0); render(); }
+async function savePoint(event: Event, game: Game): Promise<void> { const form = event.currentTarget as HTMLFormElement; if (!form.reportValidity()) return; event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? ""); if (!REASONS.includes(reason as Reason)) return; const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() }; const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply); try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); } }
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
-function editPoint(id: string): void { const point = data.games.flatMap((game) => game.reviewPoints.map((item) => ({ game, item }))).find(({ item }) => item.id === id); if (point) { location.hash = `#/game/${encodeURIComponent(point.game.id)}?ply=${point.item.ply}`; } }
-async function deletePoint(id: string): Promise<void> { if (!window.confirm("確定刪除此複盤局面？")) return; const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); render(); } catch (error) { game.reviewPoints = previous; showError(error); } }
-async function persist(): Promise<void> {
-  await repo.saveProfile(activeProfile, data);
-  if (activeUser && !profileLoadFailed) {
-    syncStatus = "尚未同步";
-    autosync.schedule();
-  }
-}
-function exportData(): void { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); }
-async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); if (!window.confirm("這會完整取代目前本機資料，確定要還原嗎？")) return; const previous = data; try { data = restored; await persist(); render(); } catch (error) { data = previous; throw error; } } catch (error) { showError(error); } }
-async function startGoogleLoginFromUi(): Promise<void> {
-  const button = document.querySelector<HTMLButtonElement>("#google-login");
-  if (button) { button.disabled = true; button.textContent = "正在前往 Google…"; }
-  try {
-    const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin));
-    if (!error) return;
-    syncMessage = error;
-  } catch (error) {
-    syncMessage = error instanceof Error ? `Google 登入啟動失敗：${error.message}` : "Google 登入啟動失敗，請重試。";
-  }
-  render();
-}
-async function logout(): Promise<void> {
-  profileGeneration += 1;
-  autosync.invalidate();
-  const { error } = await supabase.auth.signOut();
-  if (error) { syncStatus = "離線／同步失敗"; syncMessage = `登出失敗：${error.message}`; }
-  else {
-    activeUser = null; activeProfile = "guest"; profileLoadFailed = false; syncStatus = "僅本機";
-    syncMessage = "已登出；帳號資料仍保留在本機但已隱藏。";
-    await activateProfile("guest");
-  }
-  render();
-}
-async function syncNow(): Promise<void> {
-  if (!activeUser || profileLoadFailed) return;
-  await autosync.reconcile();
-  return;
-  /*
-  syncMessage = "";
-  try {
-    const user = await currentUser();
-    if (!user) { syncStatus = "僅本機"; syncMessage = "請先登入；同步不會自動執行。"; render(); return; }
-    const cloud = new SupabaseSyncRepository();
-    const row = await cloud.read(user.id);
-    const localHash = await payloadHash(data);
-    const cloudData = row ? validateCloudPayload(row.payload) : null;
-    const cloudHash = cloudData ? await payloadHash(cloudData) : undefined;
-    syncMetadata = readMetadata(user.id);
-    const baseline = syncMetadata.ownerUid === user.id && syncMetadata.lastSyncedRevision !== undefined;
-    const localChanged = !baseline || localHash !== syncMetadata.lastSyncedPayloadHash;
-    const cloudChanged = !baseline || !row || row.revision !== syncMetadata.lastSyncedRevision || cloudHash !== syncMetadata.lastSyncedPayloadHash;
-    if (row && row.user_id !== user.id) throw new Error("雲端資料屬於另一個帳號，未套用任何變更。");
-    if (baseline && !row) throw new Error("雲端資料已不存在；未自動覆蓋本機資料，請重新同步建立基線。");
-    const decision = decideSync({ baseline, local: data, cloud: cloudData, localHash, cloudHash, localChanged, cloudChanged });
-    if (decision === "conflict" && cloudData && row) { pendingConflict = { userId: user.id, rowRevision: row.revision, cloudData }; syncStatus = "衝突"; syncMessage = `本機 ${data.games.length} 局、雲端 ${cloudData.games.length} 局；請先備份再選擇。`; render(); return; }
-    if (decision === "download-cloud" && cloudData && row) {
-      if (!window.confirm("這會以已驗證的雲端資料取代本機資料，確定嗎？")) return;
-      await repo.save(cloudData);
-      data = cloudData;
-      syncMetadata = { ownerUid: user.id, lastSyncedRevision: row.revision, lastSyncedPayloadHash: cloudHash, hashVersion: 1 };
-    } else if (decision === "initialize-empty" || decision === "initialize-local" || decision === "push-local") {
-      if (decision === "initialize-local" && !window.confirm("要將這台裝置的棋局上傳為新帳號基線嗎？")) return;
-      const saved = decision === "push-local" && row ? await cloud.casUpdate(user.id, row.revision, createBackup(data)) : await cloud.insert(user.id, createBackup(data), 1);
-      syncMetadata = { ownerUid: user.id, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: 1 };
-    }
-    writeMetadata(user.id, syncMetadata);
-    pendingConflict = undefined;
-    syncStatus = "已同步";
-    syncMessage = "";
-    render();
-  } catch (error) {
-    syncStatus = "離線／同步失敗";
-    syncMessage = error instanceof Error ? error.message : "同步失敗，未套用任何變更。";
-    render();
-  }
-}
-*/
-}
-function readMetadata(userId: string): SyncMetadata {
-  try { return JSON.parse(window.localStorage.getItem(`shogi-review-sync:${userId}`) ?? '{"hashVersion":1}') as SyncMetadata; }
-  catch { return { hashVersion: 1 }; }
-}
-function writeMetadata(userId: string, value: SyncMetadata): void { window.localStorage.setItem(`shogi-review-sync:${userId}`, JSON.stringify(value)); }
+async function deletePoint(id?: string): Promise<void> { const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { game.reviewPoints = previous; throw error; } }
+async function deleteGame(id?: string): Promise<void> { const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { data.games = previous; throw error; } location.hash = "#/games"; }
+async function persist(): Promise<void> { await repo.saveProfile(activeProfile, data); if (activeUser && !profileLoadFailed && !pendingConflict) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
+async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
+function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.querySelector<HTMLElement>("[data-dialog] .dialog")?.focus(); document.body.classList.add("dialog-lock"); }
+async function startGoogleLoginFromUi(): Promise<void> { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } }
+async function removeLocalAccount(): Promise<void> { if (!activeUser) return; if (syncStatus === "同步中") throw new Error("同步完成前不能移除此裝置資料。"); const uid = activeUser.id; profileGeneration += 1; autosync.invalidate(); const { error } = await supabase.auth.signOut(); if (error) throw new Error(`登出失敗：${error.message}`); await repo.deleteProfile(`user:${uid}`); window.localStorage.removeItem(`shogi-review-sync:${uid}`); activeUser = null; activeProfile = "guest"; await activateProfile("guest"); updateSyncStatus("僅本機"); }
+async function copyGuestData(): Promise<void> { if (!pendingGuestImport) return; await repo.saveProfile(`user:${pendingGuestImport.uid}`, pendingGuestImport.guest); pendingGuestImport = undefined; closeDialog(); await activateProfile(`user:${activeUser?.id ?? ""}`); render(); }
+async function syncNow(): Promise<void> { if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; } await autosync.reconcile(); }
 async function resolveConflict(choice: "cloud" | "local"): Promise<void> {
-  if (!pendingConflict) return;
-  if (!window.confirm(choice === "cloud" ? "先下載一份本機 JSON 後，以驗證過的雲端資料取代本機嗎？" : "先下載一份雲端 JSON 後，以本機資料覆蓋雲端嗎？")) return;
-  try {
-    const conflict = pendingConflict;
-    if (choice === "cloud") {
-      exportData();
-      await repo.saveProfile(activeProfile, conflict.cloudData);
-      data = conflict.cloudData;
-      syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: conflict.rowRevision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
-    } else {
-      exportData();
-      const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, conflict.rowRevision, createBackup(data));
-      syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
-    }
-    writeMetadata(conflict.userId, syncMetadata);
-    pendingConflict = undefined;
-    syncStatus = "已同步";
-    syncMessage = "";
-  } catch (error) {
-    syncStatus = "離線／同步失敗";
-    syncMessage = error instanceof Error ? error.message : "衝突處理失敗，未套用任何變更。";
-  }
-  render();
+  if (!pendingConflict || !activeUser) return; const conflict = pendingConflict; const latest = await new SupabaseSyncRepository().read(conflict.userId);
+  if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。"); const cloudData = (await payloadHash(conflict.cloudData), conflict.cloudData);
+  if (latest.revision !== conflict.rowRevision) { const parsed = validateCloudPayload(latest.payload); pendingConflict = { userId: conflict.userId, rowRevision: latest.revision, cloudData: parsed }; throw new Error("雲端已更新，請重新確認目前資料。"); }
+  if (choice === "cloud") { await repo.saveProfile(activeProfile, cloudData); data = cloudData; syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: latest.revision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 }; }
+  else { const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, latest.revision, createBackup(data)); syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 }; }
+  writeMetadata(conflict.userId, syncMetadata); pendingConflict = undefined; updateSyncStatus("已同步");
 }
-window.addEventListener("hashchange", render);
-async function bootstrap(): Promise<void> {
-  const callbackError = await finishPkceCallback();
-  if (callbackError) startupError = callbackError;
-  try {
-    const user = await currentUser();
-    if (user) { activeUser = user; activeProfile = `user:${user.id}`; await prepareAccountProfile(user.id); }
-    await activateProfile(activeProfile);
-  } catch (error) {
-    startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`;
-    profileLoadFailed = true; data = { games: [] };
-    syncStatus = "離線／同步失敗";
-    syncMessage = "本機資料載入失敗；已停用同步。";
-  }
-  render();
-  if (activeUser && !profileLoadFailed) void autosync.reconcile();
-}
+function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
+async function prepareAccountProfile(uid: string): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
+function openGuestImportDialog(_uid: string, _guest: AppData, _cloud: AppData): void { openDestructive("guest-import"); }
+async function activateProfile(profile: ProfileKey): Promise<void> { profileGeneration += 1; autosync.invalidate(); pendingConflict = undefined; const loaded = await repo.loadProfile(profile); data = loaded.data; activeProfile = profile; profileLoadFailed = false; if (loaded.migrated) await repo.saveProfile("guest", data); }
+function filterLibrary(): void { const root = document.querySelector("#library"); if (!root) return; const game = (root.querySelector('[name="game"]') as HTMLSelectElement).value; const reason = (root.querySelector('[name="reason"]') as HTMLSelectElement).value; const tags = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="issueTags"]:checked')).map((input) => input.value); root.querySelectorAll<HTMLElement>(".library-item").forEach((item) => { item.style.display = (!game || item.dataset.game === game) && (!reason || item.dataset.reason === reason) && (!tags.length || tags.some((tag) => (item.dataset.tags ?? "").split("|").includes(tag))) ? "" : "none"; }); }
+window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
+async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
 void bootstrap();
-
-async function activateProfile(profile: ProfileKey): Promise<void> {
-  profileGeneration += 1;
-  autosync.invalidate();
-  pendingConflict = undefined;
-  profileLoadFailed = false;
-  try {
-    const loaded = await repo.loadProfile(profile);
-    data = loaded.data;
-    activeProfile = profile;
-    if (loaded.migrated) await repo.saveProfile("guest", data);
-  } catch (error) {
-    profileLoadFailed = true;
-    throw error;
-  }
-}
-async function prepareAccountProfile(uid: string, isCurrent = () => true): Promise<void> {
-  const guest = await repo.loadProfile("guest");
-  const account = await repo.loadProfile(`user:${uid}`);
-  if (!isCurrent()) return;
-  if (guest.data.games.length > 0 && account.data.games.length === 0) {
-    const copy = window.confirm("發現本機訪客棋局。要複製到此 Google 帳號嗎？訪客資料會保留；選擇取消則使用此帳號雲端資料。");
-    if (copy && isCurrent()) await repo.saveProfile(`user:${uid}`, guest.data);
-  }
-}
-
-supabase.auth.onAuthStateChange((_event, session) => {
-  const next = session?.user;
-  if (next?.id === activeUser?.id || (!next && !activeUser)) return;
-  void (async () => {
-    const transition = profileGeneration + 1;
-    profileGeneration = transition;
-    autosync.invalidate();
-    pendingConflict = undefined;
-    activeUser = null;
-    activeProfile = "guest";
-    profileLoadFailed = true;
-    data = { games: [] };
-    render();
-    try {
-      if (next) await prepareAccountProfile(next.id, () => profileGeneration === transition);
-      const profile: ProfileKey = next ? `user:${next.id}` : "guest";
-      const loaded = await repo.loadProfile(profile);
-      if (profileGeneration !== transition) return;
-      activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
-      activeProfile = profile;
-      data = loaded.data;
-      if (loaded.migrated) await repo.saveProfile("guest", data);
-      profileLoadFailed = false;
-      syncStatus = activeUser ? "同步中" : "僅本機";
-      render();
-      if (activeUser) await autosync.reconcile();
-    } catch (error) {
-      syncStatus = "離線／同步失敗";
-      syncMessage = error instanceof Error ? `本機資料載入失敗：${error.message}；已停用同步。` : "本機資料載入失敗；已停用同步。";
-      render();
-    }
-  })();
-});
-
-let lastFocusSync = 0;
-function triggerVisibleSync(): void {
-  if (!activeUser || profileLoadFailed || syncStatus === "尚未同步") return;
-  const now = Date.now();
-  if (now - lastFocusSync < 5000) return;
-  lastFocusSync = now;
-  void autosync.reconcile();
-}
-window.addEventListener("online", () => { if (activeUser && !profileLoadFailed) void autosync.reconcile(); });
-window.addEventListener("focus", triggerVisibleSync);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") triggerVisibleSync(); });
+supabase.auth.onAuthStateChange((_event, session) => { const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; void (async () => { profileGeneration += 1; autosync.invalidate(); activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); render(); if (activeUser) void autosync.reconcile(); })(); });
