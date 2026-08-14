@@ -164,7 +164,7 @@ export class AutoSyncEngine {
       this.options.onStatus?.("離線／同步失敗", "雲端資料已不存在；未覆蓋本機資料。");
       return "aborted";
     }
-    if (decision === "conflict" || decision === "initialize-local") {
+    if (decision === "conflict") {
       if (row && cloudData) this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData });
       this.options.onStatus?.("衝突", "本機與雲端都有資料，請選擇保留哪一份。");
       return "conflict";
@@ -177,7 +177,7 @@ export class AutoSyncEngine {
       await this.options.save(cloudData);
       if (!this.valid(identity)) return "aborted";
       await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: row.revision, lastSyncedPayloadHash: cloudHash, hashVersion: HASH_VERSION, lastSyncedAt: row.updated_at ?? new Date().toISOString() });
-    } else if (decision === "initialize-empty") {
+    } else if (decision === "initialize-empty" || decision === "initialize-local") {
       const saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1);
       if (!this.valid(identity)) return "aborted";
       await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: HASH_VERSION, lastSyncedAt: saved.updated_at ?? new Date().toISOString() });

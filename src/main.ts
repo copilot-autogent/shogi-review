@@ -29,7 +29,16 @@ const uid = (prefix: string): string => `${prefix}-${globalThis.crypto?.randomUU
 const autosync = new AutoSyncEngine({
   identity: () => activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
-  save: async (next) => { await repo.saveProfile(activeProfile, next); data = globalThis.structuredClone(next); },
+  save: async (next) => {
+    const profile = activeProfile;
+    const uid = activeUser?.id;
+    const generation = profileGeneration;
+    if (!uid || profileLoadFailed) return;
+    await repo.saveProfile(profile, next);
+    if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) {
+      data = globalThis.structuredClone(next);
+    }
+  },
   getMetadata: (userId) => readMetadata(userId),
   setMetadata: (userId, metadata) => { syncMetadata = metadata; writeMetadata(userId, metadata); },
   cloud: new SupabaseSyncRepository(),
@@ -328,12 +337,13 @@ async function activateProfile(profile: ProfileKey): Promise<void> {
     throw error;
   }
 }
-async function prepareAccountProfile(uid: string): Promise<void> {
+async function prepareAccountProfile(uid: string, isCurrent = () => true): Promise<void> {
   const guest = await repo.loadProfile("guest");
   const account = await repo.loadProfile(`user:${uid}`);
+  if (!isCurrent()) return;
   if (guest.data.games.length > 0 && account.data.games.length === 0) {
     const copy = window.confirm("發現本機訪客棋局。要複製到此 Google 帳號嗎？訪客資料會保留；選擇取消則使用此帳號雲端資料。");
-    if (copy) await repo.saveProfile(`user:${uid}`, guest.data);
+    if (copy && isCurrent()) await repo.saveProfile(`user:${uid}`, guest.data);
   }
 }
 
@@ -351,7 +361,7 @@ supabase.auth.onAuthStateChange((_event, session) => {
     data = { games: [] };
     render();
     try {
-      if (next) await prepareAccountProfile(next.id);
+      if (next) await prepareAccountProfile(next.id, () => profileGeneration === transition);
       const profile: ProfileKey = next ? `user:${next.id}` : "guest";
       const loaded = await repo.loadProfile(profile);
       if (profileGeneration !== transition) return;
