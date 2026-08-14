@@ -38,7 +38,7 @@ export class IndexedDbRepository implements Repository {
   private dbPromise: Promise<IDBDatabase>;
   constructor(private name = "shogi-review") {
     this.dbPromise = new Promise((resolve, reject) => {
-      const request = globalThis.indexedDB.open(name, 3);
+      const request = globalThis.indexedDB.open(name, 4);
       request.onupgradeneeded = () => {
         if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state");
         if (!request.result.objectStoreNames.contains("profiles")) request.result.createObjectStore("profiles");

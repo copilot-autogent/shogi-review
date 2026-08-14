@@ -316,6 +316,7 @@ void bootstrap();
 async function activateProfile(profile: ProfileKey): Promise<void> {
   profileGeneration += 1;
   autosync.invalidate();
+  pendingConflict = undefined;
   profileLoadFailed = false;
   try {
     const loaded = await repo.loadProfile(profile);
@@ -340,13 +341,25 @@ supabase.auth.onAuthStateChange((_event, session) => {
   const next = session?.user;
   if (next?.id === activeUser?.id || (!next && !activeUser)) return;
   void (async () => {
-    profileGeneration += 1;
+    const transition = profileGeneration + 1;
+    profileGeneration = transition;
     autosync.invalidate();
-    activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
-    activeProfile = next ? `user:${next.id}` : "guest";
+    pendingConflict = undefined;
+    activeUser = null;
+    activeProfile = "guest";
+    profileLoadFailed = true;
+    data = { games: [] };
+    render();
     try {
-      if (activeUser) await prepareAccountProfile(activeUser.id);
-      await activateProfile(activeProfile);
+      if (next) await prepareAccountProfile(next.id);
+      const profile: ProfileKey = next ? `user:${next.id}` : "guest";
+      const loaded = await repo.loadProfile(profile);
+      if (profileGeneration !== transition) return;
+      activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
+      activeProfile = profile;
+      data = loaded.data;
+      if (loaded.migrated) await repo.saveProfile("guest", data);
+      profileLoadFailed = false;
       syncStatus = activeUser ? "同步中" : "僅本機";
       render();
       if (activeUser) await autosync.reconcile();

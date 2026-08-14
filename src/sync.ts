@@ -132,6 +132,10 @@ export class AutoSyncEngine {
     if (!identity) { this.options.onStatus?.("僅本機"); return "aborted"; }
     this.running = true;
     try { return await this.run(identity); }
+    catch (error) {
+      this.options.onStatus?.("離線／同步失敗", error instanceof Error ? error.message : "同步失敗，未套用任何變更。");
+      return "aborted";
+    }
     finally {
       this.running = false;
       if (this.trailing) { this.trailing = false; this.schedule(0); }
