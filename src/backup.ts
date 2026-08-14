@@ -103,7 +103,9 @@ function validateData(data: AppData): void {
 }
 
 function validPerspective(value: unknown): Perspective | undefined {
-  return PERSPECTIVES.includes(value as Perspective) ? value as Perspective : undefined;
+  if (typeof value === "undefined") return undefined;
+  if (PERSPECTIVES.includes(value as Perspective)) return value as Perspective;
+  throw new Error("備份含有無效執棋方，未套用任何變更。");
 }
 
 function isRecord(value: unknown): value is RecordValue { return typeof value === "object" && value !== null; }

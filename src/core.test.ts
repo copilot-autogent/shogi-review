@@ -70,7 +70,9 @@ describe("schema v3 data", () => {
     expect("perspective" in legacy.games[0]!).toBe(false);
     const explicit = { ...game, perspective: "gote" as const };
     expect(parseBackup(JSON.stringify(createBackup({ games: [explicit] }))).games[0]?.perspective).toBe("gote");
-    expect(canonicalData({ games: [game] })).toBe(canonicalData({ games: [explicit] }));
+    expect(game.canonicalHash).toBe(explicit.canonicalHash);
+    expect(canonicalData({ games: [game] })).not.toBe(canonicalData({ games: [explicit] }));
+    expect(() => parseBackup(JSON.stringify({ ...old, data: { games: [{ ...old.data.games[0], perspective: "unknown" }] } }))).toThrow("無效執棋方");
   });
 
   describe("manual cloud sync safety", () => {
