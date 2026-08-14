@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBackup, parseBackup } from "./backup.js";
 import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
 import { MemoryRepository, parseStoredData } from "./repository.js";
-import { decideSync, finishPkceCallback, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload } from "./sync.js";
+import { decideSync, finishPkceCallback, googleRedirectUrl, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload } from "./sync.js";
 
 const kif = `手合割：平手
 先手：A
@@ -79,6 +79,7 @@ describe("schema v3 data", () => {
       await expect(startGoogleLogin(client(oauth), local)).resolves.toContain("Google");
       expect(pendingAtCall).toBe(true);
       expect(local.has(PKCE_PENDING_KEY)).toBe(false);
+      expect(googleRedirectUrl("http://localhost:5173")).toBe("http://localhost:5173/shogi-review/");
     });
 
     it("exchanges code before routing and preserves the hash", async () => {
@@ -123,10 +124,12 @@ describe("schema v3 data", () => {
       expect(missingResult).toContain("Google 登入缺少本機驗證狀態");
       expect(replaced.at(-1)).toBe("/shogi-review/#/");
 
+      const providerStorage = storage();
+      providerStorage.setItem(PKCE_PENDING_KEY, "1");
       const providerFailure = await finishPkceCallback(client(async () => ({ error: null })), {
         location: { pathname: "/shogi-review/", search: "?error=server_error&error_description=temporarily_unavailable", hash: "#/" },
         history: { replaceState: (_: unknown, _title: string, url: string) => replaced.push(url) },
-        localStorage: storage(),
+        localStorage: providerStorage,
       });
       expect(providerFailure).toBe("Google 登入失敗：temporarily_unavailable");
     });

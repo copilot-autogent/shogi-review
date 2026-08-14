@@ -2,7 +2,7 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, REASONS, type AppData, type Game, type IssueTag, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
-import { currentUser, decideSync, downloadKifu, finishPkceCallback, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { currentUser, decideSync, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
 import "./style.css";
 
 let repo: Repository;
@@ -179,7 +179,7 @@ async function startGoogleLoginFromUi(): Promise<void> {
   const button = document.querySelector<HTMLButtonElement>("#google-login");
   if (button) { button.disabled = true; button.textContent = "正在前往 Google…"; }
   try {
-    const error = await startGoogleLogin();
+    const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin));
     if (!error) return;
     syncMessage = error;
   } catch (error) {

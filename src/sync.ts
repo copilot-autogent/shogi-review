@@ -7,6 +7,9 @@ export const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_n2OiqY7tvxchr2rnhObTlA_u
 export const HASH_VERSION = 1;
 export const GOOGLE_REDIRECT_URL = "https://copilot-autogent.github.io/shogi-review/";
 export const PKCE_PENDING_KEY = "shogi-review-pkce-pending";
+export function googleRedirectUrl(origin: string): string {
+  return origin === "https://copilot-autogent.github.io" ? GOOGLE_REDIRECT_URL : `${origin}/shogi-review/`;
+}
 
 export interface SyncMetadata {
   ownerUid?: string;
@@ -103,12 +106,13 @@ function clearCallbackQuery(browser: BrowserAuthContext): void {
 export async function startGoogleLogin(
   client: SupabaseClient = supabase,
   storage: Pick<Storage, "setItem" | "removeItem"> = window.localStorage,
+  redirectTo: string = GOOGLE_REDIRECT_URL,
 ): Promise<string | null> {
   storage.setItem(PKCE_PENDING_KEY, "1");
   try {
     const { error } = await client.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: GOOGLE_REDIRECT_URL },
+      options: { redirectTo },
     });
     if (!error) return null;
     storage.removeItem(PKCE_PENDING_KEY);
@@ -125,7 +129,8 @@ export async function finishPkceCallback(
 ): Promise<string | null> {
   const params = new URLSearchParams(browser.location.search);
   const hasCode = params.has("code");
-  const hasError = params.has("error") || params.has("error_code") || params.has("error_description");
+  const hasError = browser.localStorage.getItem(PKCE_PENDING_KEY) === "1"
+    && (params.has("error") || params.has("error_code") || params.has("error_description"));
   if (!hasCode && !hasError) return null;
   if (hasError) {
     browser.localStorage.removeItem(PKCE_PENDING_KEY);
