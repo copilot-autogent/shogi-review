@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient, type User } from "@supabase/supabase-js";
 import { createBackup, parseBackup } from "./backup.js";
 import type { AppData } from "./model.js";
+import type { ProfileKey } from "./repository.js";
 
 export const SUPABASE_URL = "https://yuymtghhqszcfbhhhhyq.supabase.co";
 export const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_n2OiqY7tvxchr2rnhObTlA_uGUG7z1E";
@@ -23,7 +24,26 @@ export interface CloudState {
   revision: number;
   updated_at?: string;
 }
-export type SyncStatus = "僅本機" | "尚未同步" | "已同步" | "衝突" | "離線／同步失敗";
+export type SyncStatus = "僅本機" | "同步中" | "尚未同步" | "已同步" | "衝突" | "離線／同步失敗";
+export interface SyncIdentity { uid: string; profile: ProfileKey; generation: number; }
+export interface SyncSnapshot {
+  ownerUid?: string;
+  lastSyncedRevision?: number;
+  lastSyncedPayloadHash?: string;
+  hashVersion: number;
+  lastSyncedAt?: string;
+}
+export interface SyncEngineOptions {
+  identity: () => SyncIdentity | null;
+  load: () => Promise<AppData>;
+  save: (data: AppData) => Promise<void>;
+  getMetadata: (uid: string) => SyncSnapshot;
+  setMetadata: (uid: string, metadata: SyncSnapshot) => Promise<void> | void;
+  cloud: SyncRepository;
+  onStatus?: (status: SyncStatus, message?: string) => void;
+  onConflict?: (conflict: { userId: string; rowRevision: number; cloudData: AppData }) => void;
+}
+export type SyncResult = "synced" | "conflict" | "aborted";
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { flowType: "pkce", detectSessionInUrl: false },
@@ -73,6 +93,7 @@ export class SupabaseSyncRepository implements SyncRepository {
     if (error) throw error;
     return data as CloudState | null;
   }
+
   async insert(userId: string, payload: unknown, revision: number): Promise<CloudState> {
     const { data, error } = await this.client.from("user_state").insert({ user_id: userId, payload, revision }).select("user_id,payload,revision,updated_at");
     if (error) throw error;
@@ -84,6 +105,103 @@ export class SupabaseSyncRepository implements SyncRepository {
     if (error) throw error;
     if (!data || data.length !== 1) throw new Error("雲端版本已變更，請重新載入並選擇衝突處理方式。");
     return data[0] as CloudState;
+  }
+}
+
+export class AutoSyncEngine {
+  private running = false;
+  private trailing = false;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
+  constructor(private readonly options: SyncEngineOptions) {}
+  invalidate(): void {
+    this.trailing = false;
+    if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+  schedule(delay = 1000): void {
+    if (this.disposed) return;
+    if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
+    this.timer = setTimeout(() => { this.timer = undefined; void this.reconcile(); }, delay);
+  }
+  dispose(): void { this.disposed = true; this.invalidate(); }
+  async reconcile(): Promise<SyncResult> {
+    if (this.disposed) return "aborted";
+    if (this.running) { this.trailing = true; return "aborted"; }
+    const identity = this.options.identity();
+    if (!identity) { this.options.onStatus?.("僅本機"); return "aborted"; }
+    this.running = true;
+    try { return await this.run(identity); }
+    catch (error) {
+      this.options.onStatus?.("離線／同步失敗", error instanceof Error ? error.message : "同步失敗，未套用任何變更。");
+      return "aborted";
+    }
+    finally {
+      this.running = false;
+      if (this.trailing) { this.trailing = false; this.schedule(0); }
+    }
+  }
+  private valid(identity: SyncIdentity): boolean {
+    const current = this.options.identity();
+    return !this.disposed && current?.uid === identity.uid && current.profile === identity.profile && current.generation === identity.generation;
+  }
+  private async currentHash(): Promise<string> { return payloadHash(await this.options.load()); }
+  private async run(identity: SyncIdentity): Promise<SyncResult> {
+    this.options.onStatus?.("同步中");
+    const local = await this.options.load();
+    const localHash = await payloadHash(local);
+    if (!this.valid(identity)) return "aborted";
+    const metadata = this.options.getMetadata(identity.uid);
+    const baseline = metadata.ownerUid === identity.uid && metadata.lastSyncedRevision !== undefined && metadata.lastSyncedPayloadHash !== undefined;
+    const row = await this.options.cloud.read(identity.uid);
+    if (!this.valid(identity)) return "aborted";
+    const cloudData = row ? validateCloudPayload(row.payload) : null;
+    const cloudHash = cloudData ? await payloadHash(cloudData) : undefined;
+    const localChanged = baseline ? localHash !== metadata.lastSyncedPayloadHash : local.games.length > 0;
+    const cloudChanged = baseline ? !row || row.revision !== metadata.lastSyncedRevision || cloudHash !== metadata.lastSyncedPayloadHash : Boolean(row);
+    const decision = decideSync({ baseline, local, cloud: cloudData, localHash, cloudHash, localChanged, cloudChanged });
+    if (baseline && !row) {
+      this.options.onStatus?.("離線／同步失敗", "雲端資料已不存在；未覆蓋本機資料。");
+      return "aborted";
+    }
+    if (decision === "conflict") {
+      if (row && cloudData) this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData });
+      this.options.onStatus?.("衝突", "本機與雲端都有資料，請選擇保留哪一份。");
+      return "conflict";
+    }
+    if (decision === "download-cloud" && row && cloudData && cloudHash) {
+      if (await this.currentHash() !== localHash || !this.valid(identity)) {
+        this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
+        return "conflict";
+      }
+      await this.options.save(cloudData);
+      if (!this.valid(identity)) return "aborted";
+      await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: row.revision, lastSyncedPayloadHash: cloudHash, hashVersion: HASH_VERSION, lastSyncedAt: row.updated_at ?? new Date().toISOString() });
+    } else if (decision === "initialize-empty" || decision === "initialize-local") {
+      const saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1);
+      if (!this.valid(identity)) return "aborted";
+      await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: HASH_VERSION, lastSyncedAt: saved.updated_at ?? new Date().toISOString() });
+    } else if (decision === "push-local" && row) {
+      if (await this.currentHash() !== localHash || !this.valid(identity)) return "aborted";
+      try {
+        const saved = await this.options.cloud.casUpdate(identity.uid, row.revision, createCloudPayload(local));
+        if (!this.valid(identity)) return "aborted";
+        await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: HASH_VERSION, lastSyncedAt: saved.updated_at ?? new Date().toISOString() });
+      } catch {
+        const latest = await this.options.cloud.read(identity.uid);
+        const latestData = latest ? validateCloudPayload(latest.payload) : null;
+        const latestHash = latestData ? await payloadHash(latestData) : undefined;
+        if (!latestHash || latestHash !== localHash || !latest || !this.valid(identity)) {
+          if (latest && latestData) this.options.onConflict?.({ userId: identity.uid, rowRevision: latest.revision, cloudData: latestData });
+          this.options.onStatus?.("衝突", "雲端版本已變更，未覆蓋資料。");
+          return "conflict";
+        }
+        await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: latest.revision, lastSyncedPayloadHash: latestHash, hashVersion: HASH_VERSION, lastSyncedAt: latest.updated_at ?? new Date().toISOString() });
+      }
+    }
+    if (!this.valid(identity)) return "aborted";
+    this.options.onStatus?.("已同步");
+    return "synced";
   }
 }
 
