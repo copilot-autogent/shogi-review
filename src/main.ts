@@ -1,9 +1,10 @@
 import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
-import { ISSUE_TAGS, REASONS, type AppData, type Game, type IssueTag, type Reason, type ReviewPoint } from "./model.js";
+import { ISSUE_TAGS, PERSPECTIVES, REASONS, type AppData, type Game, type IssueTag, type Perspective, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryProfileRepository, type ProfileKey, type ProfileRepository } from "./repository.js";
 import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
+import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import "./style.css";
 
 let repo: ProfileRepository;
@@ -26,6 +27,8 @@ let dialogBusy = false;
 let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
 let pendingGuestImport: { uid: string; guest: AppData } | undefined;
+let temporaryFlip: { gameId: string; flipped: boolean } | undefined;
+let importDraft = { title: "", format: "KIF" as InputFormat, source: "", perspective: "spectator" as Perspective };
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
@@ -79,7 +82,7 @@ function pieceName(char: string, promoted: boolean): string {
   const base: Record<string, string> = { P: "歩", L: "香", N: "桂", S: "銀", G: "金", B: "角", R: "飛", K: "玉" };
   return promoted ? ({ P: "と", L: "杏", N: "圭", S: "全", B: "馬", R: "龍" }[char.toUpperCase()] ?? base[char.toUpperCase()] ?? char) : base[char.toUpperCase()] ?? char;
 }
-function hands(sfen: string, side: "gote" | "sente"): string {
+function hands(sfen: string, side: "gote" | "sente", orientation: BoardOrientation): string {
   const hand = sfen.split(" ")[2] ?? "-"; const counts = new Map<string, number>(); let multiplier = 0;
   for (const char of hand) {
     if (/\d/.test(char)) { multiplier = multiplier * 10 + Number(char); continue; }
@@ -87,23 +90,38 @@ function hands(sfen: string, side: "gote" | "sente"): string {
     if (char !== "-" && isGote === (side === "gote")) counts.set(char.toUpperCase(), (counts.get(char.toUpperCase()) ?? 0) + (multiplier || 1));
     multiplier = 0;
   }
-  return [...counts.entries()].map(([char, count]) => `<span class="hand-piece">${pieceName(char, false)}${count > 1 ? `<b aria-label="${count}枚">×${count}</b>` : ""}</span>`).join("") || "<span class=\"empty-hand\">なし</span>";
+  const rotated = orientation === "normal" ? side === "gote" : side === "sente";
+  return [...counts.entries()].map(([char, count]) => `<span class="hand-piece${rotated ? " rotated" : ""}">${pieceName(char, false)}${count > 1 ? `<b aria-label="${count}枚">×${count}</b>` : ""}</span>`).join("") || "<span class=\"empty-hand\">なし</span>";
 }
-function board(sfen: string): string {
-  const rows = (sfen.split(" ")[0] ?? "").split("/");
-  if (rows.length !== 9) return `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>`;
-  const cells = rows.map((row) => {
-    const out: string[] = [];
-    for (let i = 0; i < row.length; i += 1) {
-      const char = row[i]!;
-      if (/\d/.test(char)) for (let n = 0; n < Number(char); n += 1) out.push("<span class=\"square\"></span>");
-      else { const promoted = char === "+"; const piece = promoted ? row[++i] : char; if (!piece || !/[PLNSGBRKplnsgbrk]/.test(piece)) return ""; out.push(`<span class="square piece ${piece === piece.toUpperCase() ? "sente" : "gote"}">${pieceName(piece, promoted)}</span>`); }
-    }
-    return out.length === 9 ? out.join("") : "";
-  });
-  return cells.some((row) => !row) ? `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>` : `<div class="position"><div class="hand gote" aria-label="後手持駒">${hands(sfen, "gote")}</div><div class="board" aria-label="將棋盤">${cells.join("")}</div><div class="hand sente" aria-label="先手持駒">${hands(sfen, "sente")}</div></div>`;
+function defaultOrientation(game: Game): BoardOrientation { return game.perspective === "gote" ? "flipped" : "normal"; }
+function currentOrientation(game: Game): BoardOrientation { return temporaryFlip?.gameId === game.id ? (temporaryFlip.flipped ? "flipped" : "normal") : defaultOrientation(game); }
+function board(sfen: string, orientation: BoardOrientation): string {
+  const view = boardView(sfen, orientation);
+  if (!view) return `<p class="error">此局面的 SFEN 不完整，無法安全顯示。</p>`;
+  const cells = view.cells.map((cell) => {
+    if (!cell.piece) return `<span class="square"></span>`;
+    const owner = cell.piece === cell.piece.toUpperCase() ? "sente" : "gote";
+    const rotated = pieceRotated(cell.piece, orientation);
+    return `<span class="square piece ${owner}${rotated ? " rotated" : ""}${cell.promoted ? " promoted" : ""}">${pieceName(cell.piece, Boolean(cell.promoted))}</span>`;
+  }).join("");
+  const status = orientation === "normal" ? "先手在下" : "後手在下";
+  const hand = (owner: "gote" | "sente") => `<div class="hand ${owner}" aria-label="${owner === "gote" ? "後手持駒" : "先手持駒"}" role="region" tabindex="0"><span class="hand-label">${owner === "gote" ? "後手持駒" : "先手持駒"}</span>${hands(sfen, owner, orientation)}</div>`;
+  return `<div class="position" data-orientation="${orientation}"><div class="orientation-toolbar"><span role="status" aria-live="polite">${status}</span><button type="button" class="secondary" data-flip aria-pressed="${orientation === "flipped"}">翻轉棋盤</button></div>${hand(view.topHandOwner)}<div class="board" aria-label="將棋盤">${cells}</div>${hand(view.bottomHandOwner)}</div>`;
 }
 function optionList(values: readonly string[], selected: string): string { return values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(value)}</option>`).join(""); }
+function perspectiveOptions(selected: Perspective): string {
+  return optionList(["spectator", "sente", "gote"] as const, selected)
+    .replace('value="spectator"', 'value="spectator"') // keep optionList escaping centralized
+    .replace(">spectator<", ">觀戰<").replace(">sente<", ">我是先手<").replace(">gote<", ">我是後手<");
+}
+function updateImportDraft(): void {
+  importDraft = {
+    title: document.querySelector<HTMLInputElement>("#title")?.value ?? importDraft.title,
+    format: (document.querySelector<HTMLSelectElement>("#format")?.value as InputFormat | undefined) ?? importDraft.format,
+    source: document.querySelector<HTMLTextAreaElement>("#source")?.value ?? importDraft.source,
+    perspective: (document.querySelector<HTMLSelectElement>("#perspective")?.value as Perspective | undefined) ?? importDraft.perspective,
+  };
+}
 function tagChecks(selected: IssueTag[]): string { return ISSUE_TAGS.map((tag) => `<label class="check"><input type="checkbox" name="issueTags" value="${esc(tag)}" ${selected.includes(tag) ? "checked" : ""}>${esc(tag)}</label>`).join(""); }
 function gameHash(gameId: string, ply: number, rethink = false): string { return `#/game/${encodeURIComponent(gameId)}?ply=${ply}${rethink ? "&rethink=1" : ""}`; }
 function setPly(ply: number): void { if (selectedGame) location.hash = gameHash(selectedGame.id, Math.max(0, Math.min(ply, selectedGame.moves.length)), rethinkMode); }
@@ -123,6 +141,8 @@ function render(): void {
     const params = new URLSearchParams(query); const requestedPly = Number(params.get("ply"));
     selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1"; selectedGame = data.games.find((game) => game.id === id);
     if (!selectedGame) { location.hash = "#/"; return; }
+    const sameGameRoute = renderedRoute.startsWith("#/game/") && renderedRoute.slice(7).split("?")[0] === rawId;
+    if (!sameGameRoute || temporaryFlip?.gameId !== selectedGame.id) temporaryFlip = { gameId: selectedGame.id, flipped: defaultOrientation(selectedGame) === "flipped" };
     selectedPly = Math.min(selectedPly, selectedGame.moves.length);
     if (renderedRoute !== `#/game/${rawId}`) resetScroll(); renderedRoute = `#/game/${rawId}`; renderGame(selectedGame); return;
   }
@@ -133,8 +153,9 @@ function render(): void {
 }
 function renderHome(): void {
   selectedGame = undefined; const recent = [...data.games].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 5);
-  app!.innerHTML = `${header()}<main class="home"><section class="panel recent"><div class="section-heading"><h1>最近棋局</h1><a href="#/games">查看全部</a></div>${recent.length ? recent.map(gameCard).join("") : `<div class="empty"><h2>從一局開始</h2><p>匯入棋譜 → 標記局面 → 重新思考</p></div>`}</section><section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section><section class="panel import"><details id="import-panel"><summary><strong>匯入棋譜</strong><span>新增一局棋譜，開始標記值得回看的局面</span></summary><div class="import-form"><label>棋局名稱<input id="title" placeholder="例如：2026-08-12 對局"></label><label>格式<select id="format"><option>KIF</option><option>KI2</option><option>CSA</option></select></label><label>貼上棋譜<textarea id="source" rows="9"></textarea></label><div class="actions"><button id="import">載入棋譜</button><label class="file-button">選擇檔案<input id="file" type="file" accept=".kif,.ki2,.csa,.txt"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></div></details></section></main>`;
+  app!.innerHTML = `${header()}<main class="home"><section class="panel recent"><div class="section-heading"><h1>最近棋局</h1><a href="#/games">查看全部</a></div>${recent.length ? recent.map(gameCard).join("") : `<div class="empty"><h2>從一局開始</h2><p>匯入棋譜 → 標記局面 → 重新思考</p></div>`}</section><section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section><section class="panel import"><details id="import-panel"><summary><strong>＋ 匯入棋譜</strong><span>新增一局棋譜，開始標記值得回看的局面</span><span class="chevron" aria-hidden="true">⌄</span></summary><div class="import-form"><label>棋局名稱<input id="title" value="${esc(importDraft.title)}" placeholder="例如：2026-08-12 對局"></label><label>格式<select id="format">${optionList(["KIF", "KI2", "CSA"] as const, importDraft.format)}</select></label><label>我的執棋方<select id="perspective">${perspectiveOptions(importDraft.perspective)}</select></label><label>貼上棋譜<textarea id="source" rows="9">${esc(importDraft.source)}</textarea></label><div class="actions"><button id="import">載入棋譜</button><label class="file-button">選擇檔案<input id="file" type="file" accept=".kif,.ki2,.csa,.txt"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></div></details></section></main>`;
   bindCommon(); document.querySelector("#import")?.addEventListener("click", () => void importText()); document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (e) => void importFile(e));
+  document.querySelector("#title")?.addEventListener("input", updateImportDraft); document.querySelector("#format")?.addEventListener("change", updateImportDraft); document.querySelector("#perspective")?.addEventListener("change", updateImportDraft); document.querySelector("#source")?.addEventListener("input", updateImportDraft);
   document.querySelector("#library")?.addEventListener("change", filterLibrary); document.querySelectorAll<HTMLElement>("[data-open]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.open ?? "", Number(el.dataset.ply ?? 0)); }));
   document.querySelectorAll<HTMLElement>("[data-download]").forEach((el) => el.addEventListener("click", () => { const game = data.games.find((item) => item.id === el.dataset.download); if (game) downloadKifu(game.sourceText, game.sourceFormat, game.title); }));
 }
@@ -148,9 +169,11 @@ function renderLibrary(): string {
 }
 function renderGame(game: Game): void {
   const sfen = game.sfens[selectedPly] ?? game.initialSfen; const point = game.reviewPoints.find((item) => item.ply === selectedPly);
-  const rethink = rethinkMode && point ? `<section class="rethink panel"><h2>重新思考</h2>${board(point.sfen)}<p>如果再遇到這個局面，你會先注意什麼？</p><button id="reveal">揭示記錄</button><div id="reveal-content" hidden><p><strong>原因：</strong>${esc(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(esc).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次注意：</strong>${esc(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${esc(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${esc(point.legacyNotes)}</p></details>` : ""}</div></section>` : "";
-  app!.innerHTML = `${header()}<main class="review-layout"><section class="panel replay"><div class="game-header"><a href="#/games">← 棋局</a><h1>${esc(game.title)}</h1><button class="secondary" data-rename="${esc(game.id)}">改名</button><button class="danger" data-game-delete="${esc(game.id)}">刪除</button></div>${board(sfen)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol><button class="secondary" id="download-kifu">下載原始棋譜</button></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label for="reason">為什麼標記這裡？ <strong>必填</strong></label><select id="reason" name="reason" required><option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>${optionList(REASONS, point?.reason ?? "")}</select><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label for="note">下次要注意什麼？</label><textarea id="note" name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><textarea id="external-notes" name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details><button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`; bindCommon();
+  const orientation = currentOrientation(game);
+  const rethink = rethinkMode && point ? `<section class="rethink panel"><h2>重新思考</h2>${board(point.sfen, orientation)}<p>如果再遇到這個局面，你會先注意什麼？</p><button id="reveal">揭示記錄</button><div id="reveal-content" hidden><p><strong>原因：</strong>${esc(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(esc).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次注意：</strong>${esc(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${esc(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${esc(point.legacyNotes)}</p></details>` : ""}</div></section>` : "";
+  app!.innerHTML = `${header()}<main class="review-layout"><section class="panel replay"><div class="game-header"><a href="#/games">← 棋局</a><h1>${esc(game.title)}</h1><button class="secondary" data-rename="${esc(game.id)}">編輯棋局</button><button class="danger" data-game-delete="${esc(game.id)}">刪除</button></div>${board(sfen, orientation)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol><button class="secondary" id="download-kifu">下載原始棋譜</button></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label for="reason">為什麼標記這裡？ <strong>必填</strong></label><select id="reason" name="reason" required><option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>${optionList(REASONS, point?.reason ?? "")}</select><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label for="note">下次要注意什麼？</label><textarea id="note" name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><textarea id="external-notes" name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details><button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`; bindCommon();
   document.querySelector("#prev")?.addEventListener("click", () => setPly(selectedPly - 1)); document.querySelector("#next")?.addEventListener("click", () => setPly(selectedPly + 1)); document.querySelectorAll<HTMLElement>("[data-ply]").forEach((el) => el.addEventListener("click", () => setPly(Number(el.dataset.ply))));
+  document.querySelectorAll<HTMLElement>("[data-flip]").forEach((el) => el.addEventListener("click", () => { temporaryFlip = { gameId: game.id, flipped: !el.getAttribute("aria-pressed") || el.getAttribute("aria-pressed") !== "true" }; renderGame(game); }));
   document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game)); document.querySelector("#download-kifu")?.addEventListener("click", () => downloadKifu(game.sourceText, game.sourceFormat, game.title)); document.querySelector("#reveal")?.addEventListener("click", () => { const content = document.querySelector<HTMLElement>("#reveal-content"); if (content) { content.hidden = false; document.querySelector("#reveal")?.remove(); } });
 }
 function renderSettings(): void {
@@ -170,7 +193,7 @@ function openDestructive(kind: "delete-point" | "delete-game" | "rename-game" | 
   dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; backupReady = false;
   const game = id ? data.games.find((item) => item.id === id) : undefined; const pointGame = kind === "delete-point" ? data.games.find((item) => item.reviewPoints.some((point) => point.id === id)) : undefined;
   const title = kind === "rename-game" ? "重新命名棋局" : kind === "delete-point" ? "刪除複盤局面？" : kind === "delete-game" ? "刪除整局棋？" : kind === "clear-guest" ? "清除訪客資料？" : kind === "remove-profile" ? "移除此裝置的帳號資料？" : kind === "guest-import" ? "保留訪客資料？" : "處理同步衝突";
-  const body = kind === "rename-game" ? `<label for="dialog-input">棋局名稱<input id="dialog-input" value="${esc(game?.title ?? "")}" required></label>` : kind === "delete-point" ? `<p>這會刪除「${esc(pointGame?.title ?? "")}」中的 1 個複盤局面。棋局與其他局面不受影響。</p>` : kind === "delete-game" ? `<p>這會一次刪除棋局與其中 ${game?.reviewPoints.length ?? 0} 個複盤局面，且無法復原。</p>` : kind === "clear-guest" ? `<p>清除訪客資料只影響此裝置，不會影響雲端。請先下載 JSON 備份。</p>${backupGate()}` : kind === "remove-profile" ? `<p>這只會移除本裝置的帳號資料，不會刪除雲端帳號。若尚未同步，未同步變更會從此裝置移除。</p>${backupGate()}<label class="check"><input id="ack" type="checkbox">我了解未同步變更只會保留在備份，雲端不會被刪除。</label>` : kind === "guest-import" ? `<p>本機訪客：${data.games.length} 局、${data.games.reduce((n, game) => n + game.reviewPoints.length, 0)} 個複盤局面。帳號雲端：0 局。</p><p>訪客資料會永遠保留在此裝置。</p><div class="actions"><button type="button" data-guest-copy>複製訪客資料</button><button type="button" class="secondary" data-guest-skip>略過，使用帳號雲端</button></div>` : `<p>本機 ${data.games.length} 局，雲端 ${pendingConflict?.cloudData.games.length ?? 0} 局。同步已暫停，請選擇要保留哪一份。</p><p class="warning">保留雲端會捨棄目前本機變更；保留本機會以目前本機資料更新雲端。處理前請先下載本機 JSON。</p>${backupGate()}<label class="check"><input id="winner-cloud" type="radio" name="winner">使用雲端資料</label><label class="check"><input id="winner-local" type="radio" name="winner">保留本機資料</label>`;
+  const body = kind === "rename-game" ? `<label for="dialog-input">棋局名稱<input id="dialog-input" value="${esc(game?.title ?? "")}" required></label><label for="dialog-perspective">我的執棋方<select id="dialog-perspective">${perspectiveOptions(game?.perspective ?? "spectator")}</select></label>` : kind === "delete-point" ? `<p>這會刪除「${esc(pointGame?.title ?? "")}」中的 1 個複盤局面。棋局與其他局面不受影響。</p>` : kind === "delete-game" ? `<p>這會一次刪除棋局與其中 ${game?.reviewPoints.length ?? 0} 個複盤局面，且無法復原。</p>` : kind === "clear-guest" ? `<p>清除訪客資料只影響此裝置，不會影響雲端。請先下載 JSON 備份。</p>${backupGate()}` : kind === "remove-profile" ? `<p>這只會移除此裝置的帳號資料，不會刪除雲端帳號。若尚未同步，未同步變更會從備份保留。</p>${backupGate()}<label class="check"><input id="ack" type="checkbox">我了解未同步變更只會保留在備份，雲端不會被刪除。</label>` : kind === "guest-import" ? `<p>本機訪客：${data.games.length} 局、${data.games.reduce((n, game) => n + game.reviewPoints.length, 0)} 個複盤局面。帳號雲端：0 局。</p><p>訪客資料會永遠保留在此裝置。</p><div class="actions"><button type="button" data-guest-copy>複製訪客資料</button><button type="button" class="secondary" data-guest-skip>略過，使用帳號雲端</button></div>` : `<p>本機 ${data.games.length} 局，雲端 ${pendingConflict?.cloudData.games.length ?? 0} 局。同步已暫停，請選擇要保留哪一份。</p><p class="warning">保留雲端會捨棄目前本機變更；保留本機會以目前本機資料更新雲端。處理前請先下載本機 JSON。</p>${backupGate()}<label class="check"><input id="winner-cloud" type="radio" name="winner">使用雲端資料</label><label class="check"><input id="winner-local" type="radio" name="winner">保留本機資料</label>`;
   const action = kind === "rename-game" ? "儲存名稱" : kind === "delete-point" || kind === "delete-game" || kind === "clear-guest" || kind === "remove-profile" ? "確認" : "套用選擇";
   app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">${title}</h2><div>${body}</div><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button>${kind !== "guest-import" ? `<button data-dialog-submit ${kind === "conflict" || kind === "clear-guest" || kind === "remove-profile" ? "disabled" : ""}>${action}</button>` : ""}</div></section></div>`);
   const dialog = document.querySelector<HTMLElement>("[data-dialog] .dialog"); document.body.classList.add("dialog-lock");
@@ -203,7 +226,7 @@ function closeDialog(): void { if (dialogBusy) return; document.querySelector("[
 async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: string): Promise<void> {
   if (dialogBusy) return; const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]"); dialogBusy = true; if (submit) submit.disabled = true;
   try {
-    if (kind === "rename-game") { const game = data.games.find((item) => item.id === id); const title = document.querySelector<HTMLInputElement>("#dialog-input")?.value.trim() ?? ""; if (!game || !title) throw new Error("棋局名稱不可為空白。"); const previous = game.title; game.title = title; try { await persist(); } catch (error) { game.title = previous; throw error; } }
+    if (kind === "rename-game") { const game = data.games.find((item) => item.id === id); const title = document.querySelector<HTMLInputElement>("#dialog-input")?.value.trim() ?? ""; const perspective = document.querySelector<HTMLSelectElement>("#dialog-perspective")?.value as Perspective | undefined; if (!game || !title || !perspective || !PERSPECTIVES.includes(perspective)) throw new Error("棋局名稱與執棋方不可為空白。"); const previous = { title: game.title, perspective: game.perspective }; game.title = title; game.perspective = perspective; temporaryFlip = { gameId: game.id, flipped: defaultOrientation(game) === "flipped" }; try { await persist(); } catch (error) { game.title = previous.title; game.perspective = previous.perspective; throw error; } }
     if (kind === "delete-point") await deletePoint(id);
     if (kind === "delete-game") await deleteGame(id);
     if (kind === "clear-guest") { await repo.deleteProfile("guest"); data = { games: [] }; }
@@ -214,9 +237,9 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
   } catch (error) { dialogBusy = false; if (submit) submit.disabled = false; showError(error); }
 }
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
-async function importText(): Promise<void> { try { await addGame(document.querySelector<HTMLTextAreaElement>("#source")?.value ?? "", document.querySelector<HTMLSelectElement>("#format")?.value as InputFormat, document.querySelector<HTMLInputElement>("#title")?.value ?? ""); } catch (error) { showError(error); } }
-async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const source = decodeRecordBytes(new Uint8Array(await file.arrayBuffer())); await addGame(source, detectFormat(source, file.name), file.name); } catch (error) { showError(error); } }
-async function addGame(source: string, format: InputFormat, title: string): Promise<void> { const game = parseGame(source, format, title); const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash); if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } } location.hash = gameHash((existing ?? game).id, 0); render(); }
+async function importText(): Promise<void> { updateImportDraft(); try { await addGame(importDraft.source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
+async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const source = decodeRecordBytes(new Uint8Array(await file.arrayBuffer())); importDraft = { ...importDraft, title: file.name, format: detectFormat(source, file.name), source }; await addGame(source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
+async function addGame(source: string, format: InputFormat, title: string, perspective: Perspective = "spectator"): Promise<void> { const game = parseGame(source, format, title); game.perspective = perspective; const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash); if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } } else if (existing.perspective !== perspective) { const previous = existing.perspective; existing.perspective = perspective; try { await persist(); } catch (error) { existing.perspective = previous; throw error; } } importDraft = { title: "", format: "KIF", source: "", perspective: "spectator" }; location.hash = gameHash((existing ?? game).id, 0); render(); }
 async function savePoint(event: Event, game: Game): Promise<void> { const form = event.currentTarget as HTMLFormElement; if (!form.reportValidity()) return; event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? ""); if (!REASONS.includes(reason as Reason)) return; const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() }; const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply); try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); } }
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 async function deletePoint(id?: string): Promise<void> { const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { game.reviewPoints = previous; throw error; } }

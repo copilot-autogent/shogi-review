@@ -1,5 +1,5 @@
-import type { AppData, Game, IssueTag, Reason, ReviewPoint } from "./model.js";
-import { CATEGORY_MIGRATION, ISSUE_TAGS, REASONS } from "./model.js";
+import type { AppData, Game, IssueTag, Perspective, Reason, ReviewPoint } from "./model.js";
+import { CATEGORY_MIGRATION, ISSUE_TAGS, PERSPECTIVES, REASONS } from "./model.js";
 import { Position } from "tsshogi";
 import { parseGame } from "./parser.js";
 
@@ -36,6 +36,7 @@ function migrateGame(raw: unknown): Game {
     sourceText: string(raw.sourceText), initialSfen: string(raw.initialSfen), sfens: requiredStrings(raw.sfens),
     moves: requiredStrings(raw.moves), canonicalHash: string(raw.canonicalHash), createdAt: string(raw.createdAt),
     reviewPoints: points,
+    perspective: validPerspective(raw.perspective),
   };
 }
 
@@ -77,6 +78,9 @@ function validateData(data: AppData): void {
       game.sfens[0] !== game.initialSfen || !game.sfens.every((sfen) => Position.isValidSFEN(sfen)) || !Array.isArray(game.reviewPoints)) {
       throw new Error("備份含有無效棋局或重複 ID，未套用任何變更。");
     }
+    if (typeof game.perspective !== "undefined" && !PERSPECTIVES.includes(game.perspective as Perspective)) {
+      throw new Error("備份含有無效執棋方，未套用任何變更。");
+    }
     ids.add(game.id);
     try {
       const reconstructed = parseGame(game.sourceText, game.sourceFormat, game.title);
@@ -96,6 +100,12 @@ function validateData(data: AppData): void {
       pointIds.add(point.id);
     }
   }
+}
+
+function validPerspective(value: unknown): Perspective | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (PERSPECTIVES.includes(value as Perspective)) return value as Perspective;
+  throw new Error("備份含有無效執棋方，未套用任何變更。");
 }
 
 function isRecord(value: unknown): value is RecordValue { return typeof value === "object" && value !== null; }

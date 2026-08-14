@@ -2,6 +2,8 @@ export const REASONS = ["不知道怎麼走", "漏看對手的手", "計畫或�
 export type Reason = (typeof REASONS)[number];
 export const ISSUE_TAGS = ["序盤", "攻守判斷", "候選手", "王的安全", "駒的活用", "手筋", "寄せ・詰棋"] as const;
 export type IssueTag = (typeof ISSUE_TAGS)[number];
+export const PERSPECTIVES = ["sente", "gote", "spectator"] as const;
+export type Perspective = (typeof PERSPECTIVES)[number];
 
 export interface ReviewPoint {
   id: string;
@@ -26,6 +28,7 @@ export interface Game {
   canonicalHash: string;
   createdAt: string;
   reviewPoints: ReviewPoint[];
+  perspective?: Perspective;
 }
 
 export interface AppData {

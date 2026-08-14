@@ -4,6 +4,8 @@ import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
 import { MemoryProfileRepository, MemoryRepository, parseStoredData } from "./repository.js";
 import { AutoSyncEngine, decideSync, finishPkceCallback, googleRedirectUrl, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload, type CloudState, type SyncRepository, type SyncSnapshot } from "./sync.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
+import { boardView, pieceRotated } from "./orientation.js";
+import { canonicalData } from "./sync.js";
 
 const kif = `手合割：平手
 先手：A
@@ -39,6 +41,17 @@ describe("record parsing and canonical identity", () => {
     expect(decodeRecordBytes(Uint8Array.from([0x8e, 0x71]))).toBe("子");
   });
   it("hashes canonical values deterministically", () => { expect(fnv1a("a|b")).toBe(fnv1a("a|b")); expect(fnv1a("a|b")).not.toBe(fnv1a("a|c")); });
+  it("keeps orientation square order and owner-relative rotation explicit", () => {
+    const sfen = "9/9/9/9/9/9/9/9/R8 w - 1";
+    const normal = boardView(sfen, "normal");
+    const flipped = boardView(sfen, "flipped");
+    expect(normal?.cells[72]?.piece).toBe("R");
+    expect(flipped?.cells[8]?.piece).toBe("R");
+    expect(normal?.topHandOwner).toBe("gote");
+    expect(flipped?.topHandOwner).toBe("sente");
+    expect(pieceRotated("r", "normal")).toBe(true);
+    expect(pieceRotated("r", "flipped")).toBe(false);
+  });
 });
 
 describe("schema v3 data", () => {
@@ -48,6 +61,18 @@ describe("schema v3 data", () => {
     const data = parseBackup(JSON.stringify(createBackup({ games: [game] })));
     expect(data.games[0]?.reviewPoints[0]?.reason).toBe("其他");
     expect(() => parseBackup(JSON.stringify({ schemaVersion: 99, data }))).toThrow("不支援");
+  });
+  it("accepts old v3 without perspective and preserves explicit perspective", async () => {
+    const game = parseGame(kif, "KIF");
+    const old = JSON.parse(JSON.stringify(createBackup({ games: [game] }))) as { data: { games: Array<Record<string, unknown>> } };
+    delete old.data.games[0]!.perspective;
+    const legacy = parseBackup(JSON.stringify(old));
+    expect("perspective" in legacy.games[0]!).toBe(false);
+    const explicit = { ...game, perspective: "gote" as const };
+    expect(parseBackup(JSON.stringify(createBackup({ games: [explicit] }))).games[0]?.perspective).toBe("gote");
+    expect(game.canonicalHash).toBe(explicit.canonicalHash);
+    expect(canonicalData({ games: [game] })).not.toBe(canonicalData({ games: [explicit] }));
+    expect(() => parseBackup(JSON.stringify({ ...old, data: { games: [{ ...old.data.games[0], perspective: "unknown" }] } }))).toThrow("無效執棋方");
   });
 
   describe("manual cloud sync safety", () => {
