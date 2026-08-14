@@ -44,7 +44,7 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 const autosync = new AutoSyncEngine({
-  identity: () => activeUser && !profileLoadFailed && !pendingConflict ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  identity: () => activeUser && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
   save: async (next) => {
     const profile = activeProfile; const uid = activeUser?.id; const generation = profileGeneration;
@@ -113,7 +113,7 @@ function header(): string {
     : `<div class="account"><strong>訪客模式</strong><a class="button-link" href="#/login" data-login>使用 Google 登入</a></div>`;
   return `<header><div class="header-inner"><a class="brand" href="#/"><strong>將棋複盤室</strong><span>把每局變成下一次的線索</span></a>${account}</div></header>`;
 }
-function initials(): string { return (activeUser?.user_metadata?.full_name as string | undefined)?.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || (activeUser?.email?.[0] ?? "棋").toUpperCase(); }
+function initials(): string { const name = activeUser?.user_metadata?.full_name; return (typeof name === "string" ? name : "").split(/\s+/).filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || (activeUser?.email?.[0] ?? "棋").toUpperCase(); }
 function render(): void {
   const route = location.hash || "#/";
   if (route.startsWith("#/game/")) {
@@ -173,15 +173,14 @@ function openDestructive(kind: "delete-point" | "delete-game" | "rename-game" | 
   const action = kind === "rename-game" ? "儲存名稱" : kind === "delete-point" || kind === "delete-game" || kind === "clear-guest" || kind === "remove-profile" ? "確認" : "套用選擇";
   app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">${title}</h2><div>${body}</div><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button>${kind !== "guest-import" ? `<button data-dialog-submit ${kind === "conflict" || kind === "clear-guest" || kind === "remove-profile" ? "disabled" : ""}>${action}</button>` : ""}</div></section></div>`);
   const dialog = document.querySelector<HTMLElement>("[data-dialog] .dialog"); dialog?.focus(); document.body.classList.add("dialog-lock");
-  document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", () => void submitDialog(kind, id));
+  document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", () => void submitDialog(kind, id)); document.querySelector("[data-dialog-backup]")?.addEventListener("click", () => { backupReady = generateBackup(); const checkbox = document.querySelector<HTMLInputElement>("#backup-ack"); if (checkbox) checkbox.disabled = !backupReady; updateDialogGate(); });
   document.querySelector("[data-guest-copy]")?.addEventListener("click", () => void copyGuestData());
-  document.querySelector("[data-guest-skip]")?.addEventListener("click", () => closeDialog());
+  document.querySelector("[data-guest-skip]")?.addEventListener("click", () => { pendingGuestImport = undefined; closeDialog(); });
   document.querySelector("[data-dialog]")?.addEventListener("keydown", (event) => dialogKeydown(event as KeyboardEvent)); document.querySelectorAll("[data-dialog] input").forEach((input) => input.addEventListener("input", updateDialogGate)); updateDialogGate();
 }
 function backupGate(): string { return `<div class="backup-gate"><button type="button" data-dialog-backup>先下載本機 JSON 備份</button><label class="check"><input id="backup-ack" type="checkbox" disabled>我已保存備份</label></div>`; }
 function updateDialogGate(): void {
   const backupAck = document.querySelector<HTMLInputElement>("#backup-ack"); const ack = document.querySelector<HTMLInputElement>("#ack"); const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]");
-  if (document.querySelector("[data-dialog-backup]")) document.querySelector("[data-dialog-backup]")?.addEventListener("click", () => { backupReady = generateBackup(); const checkbox = document.querySelector<HTMLInputElement>("#backup-ack"); if (checkbox) checkbox.disabled = !backupReady; updateDialogGate(); });
   if (backupAck && !backupAck.checked) { if (submit) submit.disabled = true; } else if (ack && !ack.checked) { if (submit) submit.disabled = true; } else if (submit && !dialogBusy) submit.disabled = false;
 }
 function dialogKeydown(event: KeyboardEvent): void {
@@ -201,7 +200,7 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
     if (kind === "remove-profile") await removeLocalAccount();
     if (kind === "guest-import") return;
     if (kind === "conflict") { const winner = document.querySelector<HTMLInputElement>("#winner-cloud")?.checked ? "cloud" : document.querySelector<HTMLInputElement>("#winner-local")?.checked ? "local" : ""; if (!winner || !backupReady) throw new Error("請先備份並選擇資料來源。"); await resolveConflict(winner); }
-    closeDialog(); render();
+    dialogBusy = false; closeDialog(); render();
   } catch (error) { dialogBusy = false; if (submit) submit.disabled = false; showError(error); }
 }
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
@@ -228,11 +227,11 @@ async function resolveConflict(choice: "cloud" | "local"): Promise<void> {
   writeMetadata(conflict.userId, syncMetadata); pendingConflict = undefined; updateSyncStatus("已同步");
 }
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
-async function prepareAccountProfile(uid: string): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
+async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (isCurrent() && guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
 function openGuestImportDialog(_uid: string, _guest: AppData, _cloud: AppData): void { openDestructive("guest-import"); }
 async function activateProfile(profile: ProfileKey): Promise<void> { profileGeneration += 1; autosync.invalidate(); pendingConflict = undefined; const loaded = await repo.loadProfile(profile); data = loaded.data; activeProfile = profile; profileLoadFailed = false; if (loaded.migrated) await repo.saveProfile("guest", data); }
 function filterLibrary(): void { const root = document.querySelector("#library"); if (!root) return; const game = (root.querySelector('[name="game"]') as HTMLSelectElement).value; const reason = (root.querySelector('[name="reason"]') as HTMLSelectElement).value; const tags = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="issueTags"]:checked')).map((input) => input.value); root.querySelectorAll<HTMLElement>(".library-item").forEach((item) => { item.style.display = (!game || item.dataset.game === game) && (!reason || item.dataset.reason === reason) && (!tags.length || tags.some((tag) => (item.dataset.tags ?? "").split("|").includes(tag))) ? "" : "none"; }); }
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
 async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
 void bootstrap();
-supabase.auth.onAuthStateChange((_event, session) => { const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
+supabase.auth.onAuthStateChange((_event, session) => { const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
