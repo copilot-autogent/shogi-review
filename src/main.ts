@@ -1,14 +1,18 @@
 import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, REASONS, type AppData, type Game, type IssueTag, type Reason, type ReviewPoint } from "./model.js";
-import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
-import { currentUser, decideSync, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { IndexedDbRepository, MemoryProfileRepository, type ProfileKey, type ProfileRepository } from "./repository.js";
+import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, type SyncMetadata, type SyncStatus } from "./sync.js";
 import "./style.css";
 
-let repo: Repository;
-try { repo = "indexedDB" in window ? new IndexedDbRepository() : new MemoryRepository(); }
-catch { repo = new MemoryRepository(); }
+let repo: ProfileRepository;
+try { repo = "indexedDB" in window ? new IndexedDbRepository() : new MemoryProfileRepository(); }
+catch { repo = new MemoryProfileRepository(); }
 let data: AppData = { games: [] };
+let activeProfile: ProfileKey = "guest";
+let activeUser: { id: string; email?: string; user_metadata?: Record<string, unknown> } | null = null;
+let profileGeneration = 0;
+let profileLoadFailed = false;
 let selectedGame: Game | undefined;
 let selectedPly = 0;
 let rethinkMode = false;
@@ -22,6 +26,16 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
 const uid = (prefix: string): string => `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`;
+const autosync = new AutoSyncEngine({
+  identity: () => activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  load: () => Promise.resolve(globalThis.structuredClone(data)),
+  save: async (next) => { await repo.saveProfile(activeProfile, next); data = globalThis.structuredClone(next); },
+  getMetadata: (userId) => readMetadata(userId),
+  setMetadata: (userId, metadata) => { syncMetadata = metadata; writeMetadata(userId, metadata); },
+  cloud: new SupabaseSyncRepository(),
+  onConflict: (conflict) => { pendingConflict = conflict; },
+  onStatus: (status, message) => { syncStatus = status; syncMessage = message ?? ""; render(); },
+});
 
 function pieceName(char: string, promoted: boolean): string {
   const base: Record<string, string> = { P: "歩", L: "香", N: "桂", S: "銀", G: "金", B: "角", R: "飛", K: "玉" };
@@ -105,7 +119,7 @@ function renderHome(): void {
     <section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section>
     <section class="panel"><h2>我的棋局</h2>${data.games.length ? data.games.map(gameCard).join("") : "<p class='muted'>尚未有棋局。</p>"}</section>
     <section class="panel"><h2>備份</h2><p class="muted">備份會完整取代目前本機資料。</p><div class="actions"><button id="export">下載 JSON</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div></section>
-    <section class="panel"><h2>雲端同步（手動）</h2><p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><div class="actions"><button id="google-login">使用 Google 登入</button><button id="sync-now" class="secondary">手動同步</button><button id="logout" class="secondary">登出</button></div>${pendingConflict ? `<div class="actions"><button id="use-cloud">使用雲端</button><button id="keep-local" class="secondary">保留這台裝置</button></div>` : ""}</section></main>`;
+    <section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>Google：${esc(activeUser.email ?? activeUser.id)}</strong></p><p>此帳號本機棋局：${data.games.length} 局</p>` : `<p>本機訪客資料：${data.games.length} 局</p><p class="muted">登出時只會顯示訪客資料；帳號資料仍保留在本機但不會暴露。</p>`}<p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><div class="actions">${!activeUser ? `<button id="google-login">使用 Google 登入</button>` : `<button id="logout" class="secondary">登出</button>`}<button id="sync-now" class="secondary" ${!activeUser || profileLoadFailed ? "disabled" : ""}>立即同步</button></div>${pendingConflict ? `<div class="actions"><button id="use-cloud">使用雲端</button><button id="keep-local" class="secondary">保留這台裝置</button></div>` : ""}</section></main>`;
   document.querySelector("#import")?.addEventListener("click", () => void importText());
   document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (e) => void importFile(e));
   document.querySelector("#export")?.addEventListener("click", exportData);
@@ -172,7 +186,13 @@ async function savePoint(event: Event, game: Game): Promise<void> {
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 function editPoint(id: string): void { const point = data.games.flatMap((game) => game.reviewPoints.map((item) => ({ game, item }))).find(({ item }) => item.id === id); if (point) { location.hash = `#/game/${encodeURIComponent(point.game.id)}?ply=${point.item.ply}`; } }
 async function deletePoint(id: string): Promise<void> { if (!window.confirm("確定刪除此複盤局面？")) return; const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); render(); } catch (error) { game.reviewPoints = previous; showError(error); } }
-async function persist(): Promise<void> { await repo.save(data); }
+async function persist(): Promise<void> {
+  await repo.saveProfile(activeProfile, data);
+  if (activeUser && !profileLoadFailed) {
+    syncStatus = "尚未同步";
+    autosync.schedule();
+  }
+}
 function exportData(): void { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); }
 async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); if (!window.confirm("這會完整取代目前本機資料，確定要還原嗎？")) return; const previous = data; try { data = restored; await persist(); render(); } catch (error) { data = previous; throw error; } } catch (error) { showError(error); } }
 async function startGoogleLoginFromUi(): Promise<void> {
@@ -188,12 +208,22 @@ async function startGoogleLoginFromUi(): Promise<void> {
   render();
 }
 async function logout(): Promise<void> {
+  profileGeneration += 1;
+  autosync.invalidate();
   const { error } = await supabase.auth.signOut();
   if (error) { syncStatus = "離線／同步失敗"; syncMessage = `登出失敗：${error.message}`; }
-  else { syncStatus = "僅本機"; syncMessage = "已登出；本機資料保留，請在共用裝置自行匯出或刪除。"; }
+  else {
+    activeUser = null; activeProfile = "guest"; profileLoadFailed = false; syncStatus = "僅本機";
+    syncMessage = "已登出；帳號資料仍保留在本機但已隱藏。";
+    await activateProfile("guest");
+  }
   render();
 }
 async function syncNow(): Promise<void> {
+  if (!activeUser || profileLoadFailed) return;
+  await autosync.reconcile();
+  return;
+  /*
   syncMessage = "";
   try {
     const user = await currentUser();
@@ -232,6 +262,8 @@ async function syncNow(): Promise<void> {
     render();
   }
 }
+*/
+}
 function readMetadata(userId: string): SyncMetadata {
   try { return JSON.parse(window.localStorage.getItem(`shogi-review-sync:${userId}`) ?? '{"hashVersion":1}') as SyncMetadata; }
   catch { return { hashVersion: 1 }; }
@@ -244,7 +276,7 @@ async function resolveConflict(choice: "cloud" | "local"): Promise<void> {
     const conflict = pendingConflict;
     if (choice === "cloud") {
       exportData();
-      await repo.save(conflict.cloudData);
+      await repo.saveProfile(activeProfile, conflict.cloudData);
       data = conflict.cloudData;
       syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: conflict.rowRevision, lastSyncedPayloadHash: await payloadHash(data), hashVersion: 1 };
     } else {
@@ -266,6 +298,74 @@ window.addEventListener("hashchange", render);
 async function bootstrap(): Promise<void> {
   const callbackError = await finishPkceCallback();
   if (callbackError) startupError = callbackError;
-  try { data = await repo.load(); render(); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; repo = new MemoryRepository(); render(); }
+  try {
+    const user = await currentUser();
+    if (user) { activeUser = user; activeProfile = `user:${user.id}`; await prepareAccountProfile(user.id); }
+    await activateProfile(activeProfile);
+  } catch (error) {
+    startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`;
+    profileLoadFailed = true; data = { games: [] };
+    syncStatus = "離線／同步失敗";
+    syncMessage = "本機資料載入失敗；已停用同步。";
+  }
+  render();
+  if (activeUser && !profileLoadFailed) void autosync.reconcile();
 }
 void bootstrap();
+
+async function activateProfile(profile: ProfileKey): Promise<void> {
+  profileGeneration += 1;
+  autosync.invalidate();
+  profileLoadFailed = false;
+  try {
+    const loaded = await repo.loadProfile(profile);
+    data = loaded.data;
+    activeProfile = profile;
+    if (loaded.migrated) await repo.saveProfile("guest", data);
+  } catch (error) {
+    profileLoadFailed = true;
+    throw error;
+  }
+}
+async function prepareAccountProfile(uid: string): Promise<void> {
+  const guest = await repo.loadProfile("guest");
+  const account = await repo.loadProfile(`user:${uid}`);
+  if (guest.data.games.length > 0 && account.data.games.length === 0) {
+    const copy = window.confirm("發現本機訪客棋局。要複製到此 Google 帳號嗎？訪客資料會保留；選擇取消則使用此帳號雲端資料。");
+    if (copy) await repo.saveProfile(`user:${uid}`, guest.data);
+  }
+}
+
+supabase.auth.onAuthStateChange((_event, session) => {
+  const next = session?.user;
+  if (next?.id === activeUser?.id || (!next && !activeUser)) return;
+  void (async () => {
+    profileGeneration += 1;
+    autosync.invalidate();
+    activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
+    activeProfile = next ? `user:${next.id}` : "guest";
+    try {
+      if (activeUser) await prepareAccountProfile(activeUser.id);
+      await activateProfile(activeProfile);
+      syncStatus = activeUser ? "同步中" : "僅本機";
+      render();
+      if (activeUser) await autosync.reconcile();
+    } catch (error) {
+      syncStatus = "離線／同步失敗";
+      syncMessage = error instanceof Error ? `本機資料載入失敗：${error.message}；已停用同步。` : "本機資料載入失敗；已停用同步。";
+      render();
+    }
+  })();
+});
+
+let lastFocusSync = 0;
+function triggerVisibleSync(): void {
+  if (!activeUser || profileLoadFailed || syncStatus === "尚未同步") return;
+  const now = Date.now();
+  if (now - lastFocusSync < 5000) return;
+  lastFocusSync = now;
+  void autosync.reconcile();
+}
+window.addEventListener("online", () => { if (activeUser && !profileLoadFailed) void autosync.reconcile(); });
+window.addEventListener("focus", triggerVisibleSync);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") triggerVisibleSync(); });

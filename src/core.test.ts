@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createBackup, parseBackup } from "./backup.js";
 import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
-import { MemoryRepository, parseStoredData } from "./repository.js";
-import { decideSync, finishPkceCallback, googleRedirectUrl, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload } from "./sync.js";
+import { MemoryProfileRepository, MemoryRepository, parseStoredData } from "./repository.js";
+import { AutoSyncEngine, decideSync, finishPkceCallback, googleRedirectUrl, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload, type CloudState, type SyncRepository, type SyncSnapshot } from "./sync.js";
 
 const kif = `手合割：平手
 先手：A
@@ -150,5 +150,86 @@ describe("schema v3 data", () => {
     const repository = new MemoryRepository({ games: [game] });
     expect((await repository.load()).games).toHaveLength(1);
     expect(() => parseStoredData({ schemaVersion: 99, data: { games: [] } })).toThrow("不支援");
+  });
+
+  describe("account-scoped automatic sync", () => {
+    class FakeCloud implements SyncRepository {
+      rows = new Map<string, CloudState>();
+      async read(userId: string): Promise<CloudState | null> { return this.rows.get(userId) ?? null; }
+      async insert(userId: string, payload: unknown, revision: number): Promise<CloudState> {
+        if (this.rows.has(userId)) throw new Error("duplicate");
+        const row = { user_id: userId, payload, revision, updated_at: new Date().toISOString() };
+        this.rows.set(userId, row); return row;
+      }
+      async casUpdate(userId: string, revision: number, payload: unknown): Promise<CloudState> {
+        const row = this.rows.get(userId);
+        if (!row || row.revision !== revision) throw new Error("CAS");
+        const next = { ...row, payload, revision: revision + 1, updated_at: new Date().toISOString() };
+        this.rows.set(userId, next); return next;
+      }
+    }
+    const engine = (repo: MemoryProfileRepository, cloud: FakeCloud, uid: string, generation = 1) => {
+      let identity = { uid, profile: `user:${uid}` as const, generation };
+      const metadata = new Map<string, SyncSnapshot>();
+      return {
+        repo,
+        metadata,
+        setIdentity(next: typeof identity | null) { identity = next as typeof identity; },
+        value: new AutoSyncEngine({
+          identity: () => identity,
+          load: () => repo.loadProfile(`user:${uid}`).then((result) => result.data),
+          save: (next) => repo.saveProfile(`user:${uid}`, next),
+          getMetadata: (id) => metadata.get(id) ?? { hashVersion: 1 },
+          setMetadata: (id, next) => { metadata.set(id, next); },
+          cloud,
+        }),
+      };
+    };
+    it("device B empty profile logs in and pulls device A cloud data without confirmation", async () => {
+      const game = parseGame(kif, "KIF");
+      const cloud = new FakeCloud();
+      const deviceA = new MemoryProfileRepository();
+      await deviceA.saveProfile("user:same-user", { games: [game] });
+      await cloud.insert("same-user", createBackup((await deviceA.loadProfile("user:same-user")).data), 3);
+      const deviceB = engine(new MemoryProfileRepository(), cloud, "same-user");
+      expect(await deviceB.value.reconcile()).toBe("synced");
+      expect((await deviceB.repo.loadProfile("user:same-user")).data.games.map((item) => item.id)).toEqual([game.id]);
+    });
+    it("keeps guest and accounts isolated and aborts stale work after identity switch", async () => {
+      const cloud = new FakeCloud();
+      const repo = new MemoryProfileRepository();
+      const device = engine(repo, cloud, "account-a");
+      const game = parseGame(kif, "KIF");
+      await repo.saveProfile("guest", { games: [game] });
+      await repo.saveProfile("user:account-b", { games: [] });
+      device.setIdentity(null);
+      expect(await device.value.reconcile()).toBe("aborted");
+      expect((await repo.loadProfile("guest")).data.games).toHaveLength(1);
+      expect((await repo.loadProfile("user:account-b")).data.games).toHaveLength(0);
+    });
+    it("does not overwrite a local edit made while fetching cloud", async () => {
+      const game = parseGame(kif, "KIF");
+      const cloud = new FakeCloud();
+      await cloud.insert("race-user", createBackup({ games: [game] }), 1);
+      const repo = new MemoryProfileRepository();
+      const metadata = new Map<string, SyncSnapshot>();
+      let local = { games: [] as typeof game[] };
+      let changed = false;
+      const raceCloud: SyncRepository = {
+        read: async (id) => { const row = await cloud.read(id); local = { games: [game] }; changed = true; return row; },
+        insert: (...args) => cloud.insert(...args),
+        casUpdate: (...args) => cloud.casUpdate(...args),
+      };
+      const sync = new AutoSyncEngine({
+        identity: () => ({ uid: "race-user", profile: "user:race-user", generation: 1 }),
+        load: async () => changed ? local : (await repo.loadProfile("user:race-user")).data,
+        save: (next) => repo.saveProfile("user:race-user", next),
+        getMetadata: (id) => metadata.get(id) ?? { hashVersion: 1 },
+        setMetadata: (id, next) => { metadata.set(id, next); },
+        cloud: raceCloud,
+      });
+      expect(await sync.reconcile()).toBe("conflict");
+      expect((await repo.loadProfile("user:race-user")).data.games).toHaveLength(0);
+    });
   });
 });
