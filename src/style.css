@@ -10,6 +10,7 @@ header a { color: #fff; }
 .brand span, .sync-copy { display: block; font-size: .82rem; opacity: .85; }
 .account { gap: .7rem; text-align: right; }
 .account a { white-space: nowrap; }
+.account > a { min-height: 44px; display: inline-flex; align-items: center; }
 .avatar { display: grid; place-items: center; width: 2.4rem; height: 2.4rem; border-radius: 50%; background: #f3c777; color: #5c2f1b; font-weight: 800; }
 h1, h2, h3, p { margin-top: 0; }
 main { max-width: 1100px; margin: 1rem auto; padding: 0 1rem; }
@@ -66,6 +67,8 @@ details { margin: .8rem 0; }
   .header-inner, .account { align-items: flex-start; }
   .header-inner { flex-direction: column; }
   .account { width: 100%; justify-content: space-between; text-align: left; }
+  .account { flex-wrap: wrap; }
+  .account > span:not(.avatar) { min-width: 0; overflow-wrap: anywhere; }
   .home, .review-layout, .settings-grid { grid-template-columns: 1fr; }
   .recent, .rethink { grid-column: auto; }
   main { margin-top: .7rem; padding: 0 .7rem; }
