@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBackup, parseBackup } from "./backup.js";
 import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
 import { MemoryRepository, parseStoredData } from "./repository.js";
-import { decideSync, payloadHash, validateCloudPayload } from "./sync.js";
+import { decideSync, finishPkceCallback, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload } from "./sync.js";
 
 const kif = `手合割：平手
 先手：A
@@ -49,6 +49,79 @@ describe("schema v3 data", () => {
       const game = parseGame(kif, "KIF");
       expect(validateCloudPayload(createBackup({ games: [game] })).games).toHaveLength(1);
       expect(() => validateCloudPayload({ schemaVersion: 99 })).toThrow("不支援");
+    });
+  });
+  describe("Google-only PKCE auth", () => {
+    const storage = () => {
+      const values = new Map<string, string>();
+      return {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => { values.set(key, value); },
+        removeItem: (key: string) => { values.delete(key); },
+        has: (key: string) => values.has(key),
+      };
+    };
+    const client = (
+      signInWithOAuth: (request: { provider: string; options?: { redirectTo?: string } }) => Promise<{ error: null | Error }>,
+      exchangeCodeForSession: (code: string) => Promise<{ error: null | Error }> = async () => ({ error: null }),
+    ) => ({
+      auth: { signInWithOAuth, exchangeCodeForSession },
+    }) as never;
+
+    it("sets pending before exact Google OAuth and clears it on immediate error", async () => {
+      const local = storage();
+      let pendingAtCall = false;
+      const oauth = async (request: { provider: string; options?: { redirectTo?: string } }) => {
+        pendingAtCall = local.has(PKCE_PENDING_KEY);
+        expect(request).toEqual({ provider: "google", options: { redirectTo: GOOGLE_REDIRECT_URL } });
+        return { error: new Error("provider unavailable") };
+      };
+      await expect(startGoogleLogin(client(oauth), local)).resolves.toContain("Google");
+      expect(pendingAtCall).toBe(true);
+      expect(local.has(PKCE_PENDING_KEY)).toBe(false);
+    });
+
+    it("exchanges code before routing and preserves the hash", async () => {
+      const local = storage();
+      local.setItem(PKCE_PENDING_KEY, "1");
+      const replaced: string[] = [];
+      let exchanged = "";
+      const browser = {
+        location: { pathname: "/shogi-review/", search: "?code=abc&state=xyz", hash: "#/game/1" },
+        history: { replaceState: (_: unknown, _title: string, url: string) => replaced.push(url) },
+        localStorage: local,
+      };
+      const result = await finishPkceCallback(client(async () => ({ error: null }), async (code: string) => {
+        exchanged = code;
+        return { error: null };
+      }), browser);
+      expect(result).toBeNull();
+      expect(exchanged).toBe("abc");
+      expect(replaced).toEqual(["/shogi-review/#/game/1"]);
+      expect(local.has(PKCE_PENDING_KEY)).toBe(false);
+    });
+
+    it("recovers from denial and missing verifier without stale state", async () => {
+      const local = storage();
+      local.setItem(PKCE_PENDING_KEY, "1");
+      const replaced: string[] = [];
+      const denied = await finishPkceCallback(client(async () => ({ error: null })), {
+        location: { pathname: "/shogi-review/", search: "?error=access_denied&error_description=cancelled", hash: "#/" },
+        history: { replaceState: (_: unknown, _title: string, url: string) => replaced.push(url) },
+        localStorage: local,
+      });
+      expect(denied).toBe("Google 登入已取消，請重試");
+      expect(local.has(PKCE_PENDING_KEY)).toBe(false);
+      expect(replaced.at(-1)).toBe("/shogi-review/#/");
+
+      const missing = storage();
+      const missingResult = await finishPkceCallback(client(async () => ({ error: null })), {
+        location: { pathname: "/shogi-review/", search: "?code=expired", hash: "#/" },
+        history: { replaceState: (_: unknown, _title: string, url: string) => replaced.push(url) },
+        localStorage: missing,
+      });
+      expect(missingResult).toContain("Google 登入缺少本機驗證狀態");
+      expect(replaced.at(-1)).toBe("/shogi-review/#/");
     });
   });
   it("maps v1 legacy prose and unknown category without loss", () => {

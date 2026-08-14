@@ -28,4 +28,4 @@ must enforce `auth.uid() = user_id` for SELECT/UPDATE/DELETE and
 `WITH CHECK (auth.uid() = user_id)` for INSERT. An unauthenticated REST select
 with the publishable key must return no rows. A two-account authenticated RLS
 matrix remains a follow-up requiring two real sessions; authenticated live
-magic-link E2E is not claimed by local or CI tests.
+Google OAuth return and sync E2E require a real Google session and are not claimed by local or CI tests.

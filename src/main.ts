@@ -2,7 +2,7 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, REASONS, type AppData, type Game, type IssueTag, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryRepository, type Repository } from "./repository.js";
-import { currentUser, decideSync, downloadKifu, finishPkceCallback, payloadHash, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { currentUser, decideSync, downloadKifu, finishPkceCallback, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, SUPABASE_PUBLISHABLE_KEY, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
 import "./style.css";
 
 let repo: Repository;
@@ -105,12 +105,12 @@ function renderHome(): void {
     <section class="panel library"><h2>複盤局面</h2>${renderLibrary()}</section>
     <section class="panel"><h2>我的棋局</h2>${data.games.length ? data.games.map(gameCard).join("") : "<p class='muted'>尚未有棋局。</p>"}</section>
     <section class="panel"><h2>備份</h2><p class="muted">備份會完整取代目前本機資料。</p><div class="actions"><button id="export">下載 JSON</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div></section>
-    <section class="panel"><h2>雲端同步（手動）</h2><p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><label for="sync-email">登入信箱<input id="sync-email" type="email" autocomplete="email" placeholder="name@example.com"></label><div class="actions"><button id="send-link">寄送登入連結</button><button id="sync-now" class="secondary">手動同步</button><button id="logout" class="secondary">登出</button></div>${pendingConflict ? `<div class="actions"><button id="use-cloud">使用雲端</button><button id="keep-local" class="secondary">保留這台裝置</button></div>` : ""}</section></main>`;
+    <section class="panel"><h2>雲端同步（手動）</h2><p id="sync-status" role="status">${esc(syncStatus)}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><p class="muted">公開 publishable key：${esc(SUPABASE_PUBLISHABLE_KEY.slice(0, 18))}…；本機資料仍是離線主資料。</p><div class="actions"><button id="google-login">使用 Google 登入</button><button id="sync-now" class="secondary">手動同步</button><button id="logout" class="secondary">登出</button></div>${pendingConflict ? `<div class="actions"><button id="use-cloud">使用雲端</button><button id="keep-local" class="secondary">保留這台裝置</button></div>` : ""}</section></main>`;
   document.querySelector("#import")?.addEventListener("click", () => void importText());
   document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", (e) => void importFile(e));
   document.querySelector("#export")?.addEventListener("click", exportData);
   document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e));
-  document.querySelector("#send-link")?.addEventListener("click", () => void sendMagicLink());
+  document.querySelector("#google-login")?.addEventListener("click", () => void startGoogleLoginFromUi());
   document.querySelector("#sync-now")?.addEventListener("click", () => void syncNow());
   document.querySelector("#logout")?.addEventListener("click", () => void logout());
   document.querySelector("#use-cloud")?.addEventListener("click", () => void resolveConflict("cloud"));
@@ -175,12 +175,14 @@ async function deletePoint(id: string): Promise<void> { if (!window.confirm("確
 async function persist(): Promise<void> { await repo.save(data); }
 function exportData(): void { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); }
 async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); if (!window.confirm("這會完整取代目前本機資料，確定要還原嗎？")) return; const previous = data; try { data = restored; await persist(); render(); } catch (error) { data = previous; throw error; } } catch (error) { showError(error); } }
-async function sendMagicLink(): Promise<void> {
-  const email = document.querySelector<HTMLInputElement>("#sync-email")?.value.trim();
-  if (!email) { syncMessage = "請輸入信箱。"; render(); return; }
-  window.localStorage.setItem("shogi-review-pkce-pending", "1");
-  const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}${location.pathname}` } });
-  syncMessage = error ? `登入連結寄送失敗：${error.message}` : "已寄送，請在同一個瀏覽器開啟連結。";
+async function startGoogleLoginFromUi(): Promise<void> {
+  const button = document.querySelector<HTMLButtonElement>("#google-login");
+  if (button) { button.disabled = true; button.textContent = "正在前往 Google…"; }
+  try {
+    syncMessage = (await startGoogleLogin()) ?? "";
+  } catch (error) {
+    syncMessage = error instanceof Error ? `Google 登入啟動失敗：${error.message}` : "Google 登入啟動失敗，請重試。";
+  }
   render();
 }
 async function logout(): Promise<void> {
