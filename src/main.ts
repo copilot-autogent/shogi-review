@@ -82,7 +82,7 @@ function pieceName(char: string, promoted: boolean): string {
   const base: Record<string, string> = { P: "歩", L: "香", N: "桂", S: "銀", G: "金", B: "角", R: "飛", K: "玉" };
   return promoted ? ({ P: "と", L: "杏", N: "圭", S: "全", B: "馬", R: "龍" }[char.toUpperCase()] ?? base[char.toUpperCase()] ?? char) : base[char.toUpperCase()] ?? char;
 }
-function hands(sfen: string, side: "gote" | "sente"): string {
+function hands(sfen: string, side: "gote" | "sente", orientation: BoardOrientation): string {
   const hand = sfen.split(" ")[2] ?? "-"; const counts = new Map<string, number>(); let multiplier = 0;
   for (const char of hand) {
     if (/\d/.test(char)) { multiplier = multiplier * 10 + Number(char); continue; }
@@ -90,7 +90,8 @@ function hands(sfen: string, side: "gote" | "sente"): string {
     if (char !== "-" && isGote === (side === "gote")) counts.set(char.toUpperCase(), (counts.get(char.toUpperCase()) ?? 0) + (multiplier || 1));
     multiplier = 0;
   }
-  return [...counts.entries()].map(([char, count]) => `<span class="hand-piece">${pieceName(char, false)}${count > 1 ? `<b aria-label="${count}枚">×${count}</b>` : ""}</span>`).join("") || "<span class=\"empty-hand\">なし</span>";
+  const rotated = orientation === "normal" ? side === "gote" : side === "sente";
+  return [...counts.entries()].map(([char, count]) => `<span class="hand-piece${rotated ? " rotated" : ""}">${pieceName(char, false)}${count > 1 ? `<b aria-label="${count}枚">×${count}</b>` : ""}</span>`).join("") || "<span class=\"empty-hand\">なし</span>";
 }
 function defaultOrientation(game: Game): BoardOrientation { return game.perspective === "gote" ? "flipped" : "normal"; }
 function currentOrientation(game: Game): BoardOrientation { return temporaryFlip?.gameId === game.id ? (temporaryFlip.flipped ? "flipped" : "normal") : defaultOrientation(game); }
@@ -104,7 +105,7 @@ function board(sfen: string, orientation: BoardOrientation): string {
     return `<span class="square piece ${owner}${rotated ? " rotated" : ""}${cell.promoted ? " promoted" : ""}">${pieceName(cell.piece, Boolean(cell.promoted))}</span>`;
   }).join("");
   const status = orientation === "normal" ? "先手在下" : "後手在下";
-  const hand = (owner: "gote" | "sente") => `<div class="hand ${owner}" aria-label="${owner === "gote" ? "後手持駒" : "先手持駒"}" role="region" tabindex="0"><span class="hand-label">${owner === "gote" ? "後手持駒" : "先手持駒"}</span>${hands(sfen, owner)}</div>`;
+  const hand = (owner: "gote" | "sente") => `<div class="hand ${owner}" aria-label="${owner === "gote" ? "後手持駒" : "先手持駒"}" role="region" tabindex="0"><span class="hand-label">${owner === "gote" ? "後手持駒" : "先手持駒"}</span>${hands(sfen, owner, orientation)}</div>`;
   return `<div class="position" data-orientation="${orientation}"><div class="orientation-toolbar"><span role="status" aria-live="polite">${status}</span><button type="button" class="secondary" data-flip aria-pressed="${orientation === "flipped"}">翻轉棋盤</button></div>${hand(view.topHandOwner)}<div class="board" aria-label="將棋盤">${cells}</div>${hand(view.bottomHandOwner)}</div>`;
 }
 function optionList(values: readonly string[], selected: string): string { return values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(value)}</option>`).join(""); }
