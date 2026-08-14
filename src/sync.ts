@@ -58,7 +58,10 @@ function ordered(value: unknown): unknown {
   return value;
 }
 export function canonicalData(data: AppData): string {
-  return JSON.stringify(ordered(data));
+  const identityData: AppData = {
+    games: data.games.map(({ perspective: _perspective, ...game }) => game),
+  };
+  return JSON.stringify(ordered(identityData));
 }
 export async function payloadHash(data: AppData): Promise<string> {
   const bytes = new TextEncoder().encode(canonicalData(data));
