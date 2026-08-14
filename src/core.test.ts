@@ -3,6 +3,7 @@ import { createBackup, parseBackup } from "./backup.js";
 import { decodeRecordBytes, fnv1a, parseGame } from "./parser.js";
 import { MemoryProfileRepository, MemoryRepository, parseStoredData } from "./repository.js";
 import { AutoSyncEngine, decideSync, finishPkceCallback, googleRedirectUrl, GOOGLE_REDIRECT_URL, PKCE_PENDING_KEY, payloadHash, startGoogleLogin, validateCloudPayload, type CloudState, type SyncRepository, type SyncSnapshot } from "./sync.js";
+import { dialogInitialFocus } from "./dialog-focus.js";
 
 const kif = `手合割：平手
 先手：A
@@ -21,6 +22,17 @@ describe("record parsing and canonical identity", () => {
     expect(game.moves).toEqual(expectedMoves);
     expect(game.sfens).toHaveLength(4);
     expect(game.sfens[0]).toBe(game.initialSfen);
+  });
+
+  describe("dialog initial focus policy", () => {
+    it.each(["delete-point", "delete-game", "clear-guest", "remove-profile", "restore"] as const)("focuses cancel for %s", (kind) => {
+      expect(dialogInitialFocus(kind)).toBe("cancel");
+    });
+    it("focuses the first meaningful control for non-destructive dialogs", () => {
+      expect(dialogInitialFocus("rename-game")).toBe("input");
+      expect(dialogInitialFocus("conflict")).toBe("backup");
+      expect(dialogInitialFocus("guest-import")).toBe("guest-copy");
+    });
   });
   it("decodes UTF-8 and Shift-JIS explicitly", () => {
     expect(decodeRecordBytes(new TextEncoder().encode("手合割：平手"))).toContain("平手");
