@@ -316,7 +316,9 @@ async function removeLocalAccount(): Promise<void> {
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
-    await activateProfile("guest");
+    const guest = await repo.loadProfile("guest");
+    data = guest.data;
+    syncMetadata = { hashVersion: 1 };
     throw error;
   } finally {
     removingLocalAccount = false;

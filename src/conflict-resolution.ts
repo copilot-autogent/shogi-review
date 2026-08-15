@@ -46,7 +46,8 @@ export async function resolveConflict(
   };
   const ensureValid = (): boolean => valid();
   const abort = (): ConflictResolutionResult => {
-    if (deps.pending() === conflict) deps.setPending(undefined);
+    const current = deps.identity();
+    if (deps.pending() === conflict && (!current || !sameConflictIdentity(current, conflict))) deps.setPending(undefined);
     return "aborted";
   };
   const readLocal = (): AppData => globalThis.structuredClone(deps.data());
@@ -163,7 +164,10 @@ export async function resolveConflict(
   if (!ensureValid()) return abort();
   const finalLocalHash = await payloadHash(readLocal());
   if (!ensureValid()) return abort();
-  if (finalLocalHash !== localHash) return abort();
+  if (finalLocalHash !== localHash) {
+    if (deps.pending() === conflict) deps.setPending(undefined);
+    return "aborted";
+  }
   deps.setData(next);
   if (!ensureValid()) return abort();
   deps.setPending(undefined);
@@ -234,6 +238,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   }
   if (!point) {
     game.reviewPoints.push(globalThis.structuredClone(sourceReviewPoint));
+    game.reviewPoints.sort((left, right) => left.ply - right.ply);
     return;
   }
   if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourceReviewPoint));
