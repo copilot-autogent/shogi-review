@@ -1,6 +1,6 @@
 import type { AppData, IssueTag } from "./model.js";
 import { mergeAppData, type MergeConflict } from "./merge.js";
-import { createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
+import { canonicalData, createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
 import type { ProfileKey, SyncBaseRecord } from "./repository.js";
 import { ISSUE_TAGS } from "./model.js";
 
@@ -118,11 +118,19 @@ export async function resolveConflict(
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   let saved: Awaited<ReturnType<SyncRepository["casUpdate"]>>;
-  try {
-    saved = await withAbort(deps.cloud.casUpdateWithSignal?.(identity.uid, latest.revision, createCloudPayload(next), deps.signal) ?? deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next)), deps.signal);
-  } catch (error) {
-    if (!ensureValid()) return abort();
-    throw error;
+  const reuseCommittedCloud = conflict.conflicts.length === 0
+    && Boolean(conflict.baseData)
+    && canonicalData(conflict.baseData!) === canonicalData(conflict.cloudData)
+    && conflict.rowRevision === latest.revision;
+  if (reuseCommittedCloud) {
+    saved = latest;
+  } else {
+    try {
+      saved = await withAbort(deps.cloud.casUpdateWithSignal?.(identity.uid, latest.revision, createCloudPayload(next), deps.signal) ?? deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next)), deps.signal);
+    } catch (error) {
+      if (!ensureValid()) return abort();
+      throw error;
+    }
   }
   // CAS may win immediately before logout; the post-CAS guard prevents that result
   // from crossing into the next profile's local, base, metadata, or UI state.
@@ -150,7 +158,7 @@ export async function resolveConflict(
   const savedLocal = readLocal();
   const savedLocalHash = await payloadHash(savedLocal);
   if (!ensureValid()) return abort();
-  if (savedLocalHash !== nextHash) {
+  if (savedLocalHash !== localHash) {
     const refreshed = mergeAppData(next, savedLocal, next);
     deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: savedLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
