@@ -164,10 +164,14 @@ function sameConflictIdentity(identity: SyncIdentity, conflict: PendingConflict)
 
 async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) throw new Error("同步身分已變更。");
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(new Error("同步身分已變更。"));
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error("同步身分已變更。"));
+      return;
+    }
     promise.then(
       (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
       (error) => { signal.removeEventListener("abort", onAbort); reject(error); },
