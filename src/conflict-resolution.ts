@@ -145,6 +145,14 @@ export async function resolveConflict(
     throw error;
   }
   if (!ensureValid()) return abort();
+  const savedLocal = readLocal();
+  const savedLocalHash = await payloadHash(savedLocal);
+  if (!ensureValid()) return abort();
+  if (savedLocalHash !== localHash) {
+    const refreshed = mergeAppData(next, savedLocal, next);
+    deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: savedLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
+    throw new Error("本機資料已更新，請重新確認目前資料。");
+  }
   deps.setData(next);
   if (!ensureValid()) return abort();
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
