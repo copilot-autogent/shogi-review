@@ -70,9 +70,12 @@ export async function resolveConflict(
   if (latest.revision !== conflict.rowRevision) {
     const currentHash = await payloadHash(local);
     if (!ensureValid()) return abort();
+    const refreshedConflicts = conflict.conflicts.length
+      ? conflict.conflicts.map((item) => ({ ...item, local, cloud: latestCloud }))
+      : [{ entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local, cloud: latestCloud, reason: "membership" as const }];
     const refreshed = conflict.baseData
       ? mergeAppData(conflict.baseData, local, latestCloud)
-      : { data: local, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local, cloud: latestCloud, reason: "membership" as const })) };
+      : { data: local, conflicts: refreshedConflicts };
     if (!ensureValid()) return abort();
     deps.setPending({
       ...conflict,
