@@ -112,7 +112,7 @@ details { margin: .8rem 0; }
   .recent { grid-column: auto; }
   main { margin-top: .7rem; }
   .panel { padding: .8rem; }
-  .review-page { margin-top: .5rem; padding-bottom: 1rem; }
+  .review-page { margin-top: .5rem; padding-bottom: calc(6rem + env(safe-area-inset-bottom)); }
   .review-navigation {
     position: sticky;
     bottom: 0;
