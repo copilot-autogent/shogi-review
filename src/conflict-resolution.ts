@@ -211,6 +211,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
     if (item.field === "__membership" || item.field === "identity") {
       const existingReviewPoints = Array.isArray(game.reviewPoints) ? game.reviewPoints : [];
       const sourceReviewPoints = Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : [];
+      for (const key of Object.keys(game)) delete (game as unknown as Record<string, unknown>)[key];
       Object.assign(game, globalThis.structuredClone(sourceGame));
       game.reviewPoints = [
         ...globalThis.structuredClone(sourceReviewPoints),
@@ -222,6 +223,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   }
   if (!game || !sourceGame) return;
   const ply = Number(item.entityId.split(":").at(-1));
+  if (!Number.isInteger(ply)) return;
   if (!Array.isArray(game.reviewPoints)) game.reviewPoints = [];
   const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
   const sourceReviewPoint = (Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : []).find((candidate) => candidate.ply === ply);
