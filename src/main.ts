@@ -50,7 +50,7 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 const autosync = new AutoSyncEngine({
-  identity: () => activeUser && !profileLoadFailed && conflictBelongsToCurrentProfile() && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  identity: () => activeUser && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
   save: async (next) => {
     const profile = activeProfile; const uid = activeUser?.id; const generation = profileGeneration;
