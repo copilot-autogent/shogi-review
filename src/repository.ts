@@ -58,6 +58,40 @@ export class MemoryProfileRepository implements ProfileRepository {
   async deleteSyncBase(profile: ProfileKey): Promise<void> { this.bases.delete(profile); }
 }
 
+export function saveProfileAndBaseTransaction(
+  transaction: IDBTransaction,
+  profile: ProfileKey,
+  data: AppData,
+  base: SyncBaseRecord,
+  canCommit: () => boolean,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const resolveComplete = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+    const rejectTerminal = (error: unknown, fallback: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(fallback));
+    };
+    const abort = () => {
+      if (settled) return;
+      try { transaction.abort(); } catch (error) {
+        if (!(error instanceof DOMException && error.name === "InvalidStateError")) throw error;
+      }
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    transaction.oncomplete = resolveComplete;
+    transaction.onerror = () => rejectTerminal(transaction.error, "本機同步資料儲存失敗。");
+    transaction.onabort = () => rejectTerminal(transaction.error, "本機同步資料交易已取消。");
+    if (!canCommit() || signal.aborted) { abort(); return; }
+    transaction.objectStore("profiles").put(createBackup(data), profile);
+    transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
+  });
+}
+
 export class IndexedDbRepository implements Repository {
   private dbPromise: Promise<IDBDatabase>;
   constructor(private name = "shogi-review") {
@@ -165,35 +199,7 @@ export class IndexedDbRepository implements Repository {
   }
   async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void> {
     const db = await this.dbPromise;
-    await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
-      let settled = false;
-      const abort = () => {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener("abort", abort);
-        try { transaction.abort(); } catch (error) {
-          if (!(error instanceof DOMException && error.name === "InvalidStateError")) { reject(error); return; }
-        }
-        reject(new Error("同步身分已變更。"));
-      };
-      if (!canCommit() || signal?.aborted) { abort(); return; }
-      signal?.addEventListener("abort", abort, { once: true });
-      transaction.objectStore("profiles").put(createBackup(data), profile);
-      transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
-      transaction.oncomplete = () => {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener("abort", abort);
-        if (!canCommit()) {
-          reject(new Error("同步身分已變更。"));
-          return;
-        }
-        resolve();
-      };
-      transaction.onerror = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };
-      transaction.onabort = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料交易已取消。")); };
-    });
+    await saveProfileAndBaseTransaction(db.transaction(["profiles", "syncBases"], "readwrite"), profile, data, base, canCommit, signal);
   }
   async deleteSyncBase(profile: ProfileKey): Promise<void> {
     const db = await this.dbPromise;

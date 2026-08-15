@@ -6,6 +6,8 @@ import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRe
 import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
+import { AuthTransitionGate, isCurrentProfileActivation, loadProfileIfCurrent } from "./profile-state.js";
+import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
 let repo: ProfileRepository;
@@ -28,8 +30,7 @@ let pendingConflict: PendingConflict | undefined;
 let dialogBusy = false;
 let conflictResolutionRunning = false;
 let conflictResolutionAbort: AbortController | undefined;
-let removingLocalAccount = false;
-let localAccountRemovalToken: object | undefined;
+const authTransitionGate = new AuthTransitionGate();
 let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
 let pendingGuestImport: { uid: string; guest: AppData } | undefined;
@@ -293,36 +294,34 @@ async function removeLocalAccount(): Promise<void> {
   const previousProfile = activeProfile;
   const previousPending = pendingConflict;
   const previousGeneration = profileGeneration;
-  const removalToken = {};
+  const removalToken = authTransitionGate.beginRemoval();
   conflictResolutionAbort?.abort();
-  removingLocalAccount = true;
-  localAccountRemovalToken = removalToken;
   profileGeneration += 1;
   autosync.invalidate();
   const { error } = await supabase.auth.signOut();
   if (error) {
-    removingLocalAccount = false;
-    localAccountRemovalToken = undefined;
     activeUser = previousUser;
     activeProfile = previousProfile;
     pendingConflict = previousPending;
     profileGeneration = previousGeneration;
+    const queuedSession = authTransitionGate.finishRemoval(removalToken);
+    if (queuedSession !== undefined) processAuthSession(queuedSession);
     throw new Error(`登出失敗：${error.message}`);
   }
   try {
-    if (localAccountRemovalToken !== removalToken) return;
+    if (!authTransitionGate.isCurrentRemoval(removalToken)) return;
     await repo.deleteSyncBase(`user:${uid}`);
-    if (localAccountRemovalToken !== removalToken) return;
+    if (!authTransitionGate.isCurrentRemoval(removalToken)) return;
     await repo.deleteProfile(`user:${uid}`);
-    if (localAccountRemovalToken !== removalToken) return;
+    if (!authTransitionGate.isCurrentRemoval(removalToken)) return;
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
-    await activateProfile("guest");
+    if (await activateProfile("guest") === "aborted") return;
     updateSyncStatus("僅本機");
     render();
   } catch (error) {
-    if (localAccountRemovalToken !== removalToken) throw error;
+    if (!authTransitionGate.isCurrentRemoval(removalToken)) throw error;
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
@@ -336,13 +335,11 @@ async function removeLocalAccount(): Promise<void> {
     render();
     throw error;
   } finally {
-    if (localAccountRemovalToken === removalToken) {
-      removingLocalAccount = false;
-      localAccountRemovalToken = undefined;
-    }
+    const queuedSession = authTransitionGate.finishRemoval(removalToken);
+    if (queuedSession !== undefined) processAuthSession(queuedSession);
   }
 }
-async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; await activateProfile(`user:${pending.uid}`); closeDialog(); render(); void autosync.reconcile(); }
+async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; if (await activateProfile(`user:${pending.uid}`) === "aborted") return; closeDialog(); render(); void autosync.reconcile(); }
 function conflictBelongsToCurrentProfile(): boolean {
   return !pendingConflict || Boolean(activeUser
     && pendingConflict.userId === activeUser.id
@@ -393,9 +390,55 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
 async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (isCurrent() && guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
 function openGuestImportDialog(_uid: string, _guest: AppData, _cloud: AppData): void { openDestructive("guest-import"); }
-async function activateProfile(profile: ProfileKey, generation = profileGeneration + 1): Promise<void> { profileGeneration = generation; autosync.invalidate(); pendingConflict = undefined; const loaded = await repo.loadProfile(profile); data = loaded.data; activeProfile = profile; syncMetadata = profile.startsWith("user:") ? readMetadata(profile.slice("user:".length)) : { hashVersion: 1 }; profileLoadFailed = false; if (loaded.migrated) await repo.saveProfile("guest", data); }
+type ActivationResult = "activated" | "aborted";
+async function activateProfile(profile: ProfileKey, generation = profileGeneration + 1): Promise<ActivationResult> {
+  profileGeneration = generation;
+  autosync.invalidate();
+  pendingConflict = undefined;
+  const expectedUserId = profile.startsWith("user:") ? profile.slice("user:".length) : undefined;
+  const isCurrent = () => isCurrentProfileActivation(profile, generation, profileGeneration, activeUser?.id);
+  const loaded = await loadProfileIfCurrent(() => repo.loadProfile(profile), isCurrent);
+  if (!loaded) return "aborted";
+  data = loaded.data;
+  activeProfile = profile;
+  syncMetadata = expectedUserId ? readMetadata(expectedUserId) : { hashVersion: 1 };
+  profileLoadFailed = false;
+  if (loaded.migrated) {
+    await repo.saveProfile("guest", loaded.data);
+    if (!isCurrent()) return "aborted";
+  }
+  return "activated";
+}
 function filterLibrary(): void { const root = document.querySelector("#library"); if (!root) return; const game = (root.querySelector('[name="game"]') as HTMLSelectElement).value; const reason = (root.querySelector('[name="reason"]') as HTMLSelectElement).value; const tags = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="issueTags"]:checked')).map((input) => input.value); root.querySelectorAll<HTMLElement>(".library-item").forEach((item) => { item.style.display = (!game || item.dataset.game === game) && (!reason || item.dataset.reason === reason) && (!tags.length || tags.some((tag) => (item.dataset.tags ?? "").split("|").includes(tag))) ? "" : "none"; }); }
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
-async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
+async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; if (await activateProfile(activeProfile) === "aborted") return; } else if (await activateProfile("guest") === "aborted") return; } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
 void bootstrap();
-supabase.auth.onAuthStateChange((_event, session) => { if (removingLocalAccount && !session?.user) return; if (removingLocalAccount && session?.user) { removingLocalAccount = false; localAccountRemovalToken = undefined; } const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = ++profileGeneration; conflictResolutionAbort?.abort(); pendingConflict = undefined; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile, transition); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
+function processAuthSession(session: Session | null): void {
+  const next = session?.user;
+  if (next?.id === activeUser?.id || (!next && !activeUser)) return;
+  const transition = ++profileGeneration;
+  conflictResolutionAbort?.abort();
+  pendingConflict = undefined;
+  autosync.invalidate();
+  void (async () => {
+    try {
+      activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
+      activeProfile = next ? `user:${next.id}` : "guest";
+      if (await activateProfile(activeProfile, transition) === "aborted") return;
+      render();
+      if (activeUser) {
+        await prepareAccountProfile(activeUser.id, () => profileGeneration === transition);
+        if (profileGeneration === transition) void autosync.reconcile();
+      }
+    } catch (error) {
+      if (profileGeneration !== transition) return;
+      profileLoadFailed = true;
+      updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。");
+      render();
+    }
+  })();
+}
+supabase.auth.onAuthStateChange((_event, session) => {
+  if (authTransitionGate.queueDuringRemoval(session)) return;
+  processAuthSession(session);
+});
