@@ -6,7 +6,7 @@ import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRe
 import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
-import { AuthTransitionGate, isCurrentProfileActivation, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
+import { AuthTransitionGate, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -16,6 +16,12 @@ let data: AppData = { games: [] };
 let activeProfile: ProfileKey = "guest";
 let activeUser: { id: string; email?: string; user_metadata?: Record<string, unknown> } | null = null;
 let profileGeneration = 0;
+type TransitionUser = { id: string; email?: string; user_metadata?: Record<string, unknown> };
+type ProfileTransition = { generation: number; profile: ProfileKey; user: TransitionUser | null };
+let profileTransition: ProfileTransition | undefined;
+let desiredUserId: string | undefined;
+let queuedAuthSession: Session | null | undefined;
+let authTransitionRunning = false;
 let profileLoadFailed = false;
 let selectedGame: Game | undefined;
 let selectedPly = 0;
@@ -55,13 +61,13 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 const autosync = new AutoSyncEngine({
-  identity: () => activeUser && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  identity: () => activeUser && !profileTransition && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
   save: async (next) => {
     const profile = activeProfile; const uid = activeUser?.id; const generation = profileGeneration;
-    if (!uid || profileLoadFailed) return;
+    if (!uid || profileTransition || profileLoadFailed) return;
     await repo.saveProfile(profile, next);
-    if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) data = globalThis.structuredClone(next);
+    if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileTransition && !profileLoadFailed) data = globalThis.structuredClone(next);
   },
   getMetadata: (userId) => readMetadata(userId),
   setMetadata: (userId, metadata) => { syncMetadata = metadata; return Promise.resolve(writeMetadata(userId, metadata)); },
@@ -149,6 +155,11 @@ function header(): string {
 }
 function initials(): string { const name = activeUser?.user_metadata?.full_name; return (typeof name === "string" ? name : "").split(/\s+/).filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || (activeUser?.email?.[0] ?? "棋").toUpperCase(); }
 function render(): void {
+  if (profileTransition) {
+    renderedRoute = "";
+    app!.innerHTML = `<main class="loading"><section class="panel"><h1>載入資料中…</h1><p>正在安全切換帳號，請稍候。</p></section></main>`;
+    return;
+  }
   const route = location.hash || "#/";
   if (route.startsWith("#/game/")) {
     const [rawId, query = ""] = route.slice(7).split("?"); let id = "";
@@ -244,7 +255,7 @@ function dialogKeydown(event: KeyboardEvent): void {
 }
 function closeDialog(): void { if (dialogBusy) return; document.querySelector("[data-dialog]")?.remove(); document.body.classList.remove("dialog-lock"); dialogReturnFocus?.focus(); dialogReturnFocus = null; }
 async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: string): Promise<void> {
-  if (dialogBusy) return; const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]"); dialogBusy = true; if (submit) submit.disabled = true;
+  if (dialogBusy || profileTransition) return; const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]"); dialogBusy = true; if (submit) submit.disabled = true;
   try {
     if (kind === "rename-game") { const game = data.games.find((item) => item.id === id); const title = document.querySelector<HTMLInputElement>("#dialog-input")?.value.trim() ?? ""; const perspective = document.querySelector<HTMLSelectElement>("#dialog-perspective")?.value as Perspective | undefined; if (!game || !title || !perspective || !PERSPECTIVES.includes(perspective)) throw new Error("棋局名稱與執棋方不可為空白。"); const previous = { title: game.title, perspective: game.perspective }; game.title = title; game.perspective = perspective; temporaryFlip = { gameId: game.id, flipped: defaultOrientation(game) === "flipped" }; try { await persist(); } catch (error) { game.title = previous.title; game.perspective = previous.perspective; throw error; } }
     if (kind === "delete-point") await deletePoint(id);
@@ -277,14 +288,14 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
 async function importText(): Promise<void> { updateImportDraft(); try { await addGame(importDraft.source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
 async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const source = decodeRecordBytes(new Uint8Array(await file.arrayBuffer())); importDraft = { ...importDraft, title: file.name, format: detectFormat(source, file.name), source }; await addGame(source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
-async function addGame(source: string, format: InputFormat, title: string, perspective: Perspective = "spectator"): Promise<void> { const game = parseGame(source, format, title); game.perspective = perspective; const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash); if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { data.games = previous; throw error; } } else if (existing.perspective !== perspective) { const previous = existing.perspective; existing.perspective = perspective; try { await persist(); } catch (error) { existing.perspective = previous; throw error; } } importDraft = { title: "", format: "KIF", source: "", perspective: "spectator" }; location.hash = gameHash((existing ?? game).id, 0); render(); }
-async function savePoint(event: Event, game: Game): Promise<void> { const form = event.currentTarget as HTMLFormElement; if (!form.reportValidity()) return; event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? ""); if (!REASONS.includes(reason as Reason)) return; const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() }; const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply); try { await persist(); render(); } catch (error) { game.reviewPoints = previous; render(); showError(error); } }
+async function addGame(source: string, format: InputFormat, title: string, perspective: Perspective = "spectator"): Promise<void> { assertWritable(); const game = parseGame(source, format, title); game.perspective = perspective; const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash); if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; } } else if (existing.perspective !== perspective) { const previous = existing.perspective; existing.perspective = perspective; try { await persist(); } catch (error) { if (!profileTransition) existing.perspective = previous; throw error; } } importDraft = { title: "", format: "KIF", source: "", perspective: "spectator" }; location.hash = gameHash((existing ?? game).id, 0); render(); }
+async function savePoint(event: Event, game: Game): Promise<void> { assertWritable(); const form = event.currentTarget as HTMLFormElement; if (!form.reportValidity()) return; event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? ""); if (!REASONS.includes(reason as Reason)) return; const old = game.reviewPoints.find((item) => item.ply === selectedPly); const point: ReviewPoint = { id: old?.id ?? uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), legacyNotes: old?.legacyNotes, createdAt: old?.createdAt ?? new Date().toISOString() }; const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply); try { await persist(); render(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; render(); showError(error); } }
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
-async function deletePoint(id?: string): Promise<void> { const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { game.reviewPoints = previous; throw error; } }
-async function deleteGame(id?: string): Promise<void> { const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { data.games = previous; throw error; } location.hash = "#/games"; }
-async function persist(): Promise<void> { localDataVersion += 1; await repo.saveProfile(activeProfile, data); if (pendingConflict) autosync.invalidate(); else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
+async function deletePoint(id?: string): Promise<void> { assertWritable(); const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; throw error; } }
+async function deleteGame(id?: string): Promise<void> { assertWritable(); const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; } location.hash = "#/games"; }
+async function persist(): Promise<void> { assertWritable(); const identity = currentIdentity(); if (!identity) throw new Error("尚未完成帳號資料載入。"); localDataVersion += 1; await repo.saveProfile(identity.profile, data); if (!identityIsCurrent(identity)) throw new Error("帳號身分已變更，未儲存變更。"); if (pendingConflict) autosync.invalidate(); else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
 async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
-function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.body.classList.add("dialog-lock"); const cancel = document.querySelector<HTMLElement>("[data-dialog] [data-dialog-cancel]"); if (cancel) cancel.focus(); }
+function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { if (profileTransition) return; const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { if (!profileTransition) data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.body.classList.add("dialog-lock"); const cancel = document.querySelector<HTMLElement>("[data-dialog] [data-dialog-cancel]"); if (cancel) cancel.focus(); }
 async function startGoogleLoginFromUi(): Promise<void> { try { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } } catch (error) { syncMessage = error instanceof Error ? error.message : "Google 登入啟動失敗，請重試。"; render(); } }
 async function removeLocalAccount(): Promise<void> {
   if (!activeUser) return;
@@ -292,18 +303,20 @@ async function removeLocalAccount(): Promise<void> {
   const uid = activeUser.id;
   const previousUser = activeUser;
   const previousProfile = activeProfile;
+  const previousData = data;
   const previousPending = pendingConflict;
-  const previousGeneration = profileGeneration;
   const removalToken = authTransitionGate.beginRemoval();
   conflictResolutionAbort?.abort();
-  profileGeneration += 1;
-  autosync.invalidate();
+  beginProfileTransition(null);
   const { error } = await supabase.auth.signOut();
   if (error) {
     activeUser = previousUser;
     activeProfile = previousProfile;
+    data = previousData;
     pendingConflict = previousPending;
-    profileGeneration = previousGeneration;
+    desiredUserId = previousUser.id;
+    profileTransition = undefined;
+    render();
     const queuedSession = authTransitionGate.finishRemoval(removalToken);
     if (queuedSession !== undefined) processAuthSession(queuedSession);
     throw new Error(`登出失敗：${error.message}`);
@@ -367,7 +380,30 @@ async function removeLocalAccount(): Promise<void> {
     if (queuedSession !== undefined) processAuthSession(queuedSession);
   }
 }
-async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; if (await activateProfile(`user:${pending.uid}`) === "aborted") return; closeDialog(); render(); void autosync.reconcile(); }
+function currentIdentity(): { uid: string; profile: ProfileKey; generation: number } | null {
+  return activeUser && !profileTransition && !profileLoadFailed
+    ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration }
+    : null;
+}
+function assertWritable(): void {
+  if (profileTransition) throw new Error("帳號資料載入中，暫時不能修改。");
+}
+function identityIsCurrent(identity: { uid: string; profile: ProfileKey; generation: number }): boolean {
+  const current = currentIdentity();
+  return Boolean(current && current.uid === identity.uid && current.profile === identity.profile && current.generation === identity.generation);
+}
+async function copyGuestData(): Promise<void> {
+  const pending = pendingGuestImport;
+  const identity = currentIdentity();
+  if (!pending || !identity || identity.uid !== pending.uid) return;
+  await repo.saveProfile(`user:${pending.uid}`, pending.guest);
+  if (!identityIsCurrent(identity) || pendingGuestImport !== pending) return;
+  pendingGuestImport = undefined;
+  const user = activeUser;
+  const token = beginProfileTransition(user);
+  if (await activateProfile(`user:${pending.uid}`, token) === "aborted") return;
+  closeDialog(); render(); void autosync.reconcile();
+}
 function conflictBelongsToCurrentProfile(): boolean {
   return !pendingConflict || Boolean(activeUser
     && pendingConflict.userId === activeUser.id
@@ -375,11 +411,13 @@ function conflictBelongsToCurrentProfile(): boolean {
     && pendingConflict.generation === profileGeneration);
 }
 async function syncNow(): Promise<void> {
+  assertWritable();
   if (pendingConflict && !conflictBelongsToCurrentProfile()) pendingConflict = undefined;
   if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; }
   await autosync.reconcile();
 }
 async function resolveConflict(choices: Record<string, "cloud" | "local">): Promise<void> {
+  assertWritable();
   if (conflictResolutionRunning) throw new Error("衝突處理正在進行中。");
   conflictResolutionRunning = true;
   const abortController = new AbortController();
@@ -387,21 +425,21 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
   conflictResolutionAbort = abortController;
   try {
     const result = await resolveConflictSafely(choices, {
-      identity: () => activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+      identity: currentIdentity,
       pending: () => pendingConflict,
       setPending: (next) => { pendingConflict = next; },
       data: () => data,
       setData: (next) => {
-        const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        const current = currentIdentity();
         if (current && capturedPending && current.uid === capturedPending.userId && current.profile === capturedPending.profile && current.generation === capturedPending.generation) data = globalThis.structuredClone(next);
       },
         repository: { saveProfileAndBase: repo.saveProfileAndBase.bind(repo) },
       cloud: new SupabaseSyncRepository(),
       metadata: async (uid, value) => {
-        const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        const current = currentIdentity();
         if (pendingConflict !== capturedPending || current?.uid !== uid || pendingConflict?.profile !== current.profile || pendingConflict.generation !== current.generation) throw new Error("同步身分已變更。");
         await writeMetadata(uid, value);
-        const after = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        const after = currentIdentity();
         if (pendingConflict !== capturedPending || after?.uid !== uid || pendingConflict?.profile !== after.profile || pendingConflict.generation !== after.generation) throw new Error("同步身分已變更。");
         syncMetadata = value;
       },
@@ -416,53 +454,107 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
   }
 }
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
-async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (isCurrent() && guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
+async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> {
+  const guest = await repo.loadProfile("guest");
+  if (!isCurrent()) return;
+  const account = await repo.loadProfile(`user:${uid}`);
+  if (isCurrent() && guest.data.games.length && !account.data.games.length) {
+    pendingGuestImport = { uid, guest: guest.data };
+    openGuestImportDialog(uid, guest.data, account.data);
+  }
+}
 function openGuestImportDialog(_uid: string, _guest: AppData, _cloud: AppData): void { openDestructive("guest-import"); }
 type ActivationResult = "activated" | "aborted";
-async function activateProfile(profile: ProfileKey, generation = profileGeneration + 1): Promise<ActivationResult> {
-  profileGeneration = generation;
+async function activateProfile(profile: ProfileKey, token: ProfileTransition): Promise<ActivationResult> {
   autosync.invalidate();
   pendingConflict = undefined;
   const expectedUserId = profile.startsWith("user:") ? profile.slice("user:".length) : undefined;
-  const isCurrent = () => isCurrentProfileActivation(profile, generation, profileGeneration, activeUser?.id);
+  const isCurrent = () => profileTransition === token && desiredUserId === (token.user?.id);
   const loaded = await loadProfileIfCurrent(() => repo.loadProfile(profile), isCurrent);
   if (!loaded) return "aborted";
-  data = loaded.data;
-  activeProfile = profile;
-  syncMetadata = expectedUserId ? readMetadata(expectedUserId) : { hashVersion: 1 };
-  profileLoadFailed = false;
   if (loaded.migrated) {
     await repo.saveProfile("guest", loaded.data);
     if (!isCurrent()) return "aborted";
   }
+  if (!isCurrent()) return "aborted";
+  activeUser = token.user;
+  activeProfile = profile;
+  data = loaded.data;
+  syncMetadata = expectedUserId ? readMetadata(expectedUserId) : { hashVersion: 1 };
+  profileLoadFailed = false;
+  profileTransition = undefined;
   return "activated";
 }
 function filterLibrary(): void { const root = document.querySelector("#library"); if (!root) return; const game = (root.querySelector('[name="game"]') as HTMLSelectElement).value; const reason = (root.querySelector('[name="reason"]') as HTMLSelectElement).value; const tags = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="issueTags"]:checked')).map((input) => input.value); root.querySelectorAll<HTMLElement>(".library-item").forEach((item) => { item.style.display = (!game || item.dataset.game === game) && (!reason || item.dataset.reason === reason) && (!tags.length || tags.some((tag) => (item.dataset.tags ?? "").split("|").includes(tag))) ? "" : "none"; }); }
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
-async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; if (await activateProfile(activeProfile) === "aborted") return; } else if (await activateProfile("guest") === "aborted") return; } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
+function beginProfileTransition(user: TransitionUser | null): ProfileTransition {
+  const token = { generation: ++profileGeneration, profile: user ? `user:${user.id}` as ProfileKey : "guest", user };
+  desiredUserId = user?.id;
+  profileTransition = token;
+  activeUser = null;
+  activeProfile = "guest";
+  data = { games: [] };
+  profileLoadFailed = false;
+  selectedGame = undefined;
+  pendingConflict = undefined;
+  pendingGuestImport = undefined;
+  conflictResolutionAbort?.abort();
+  autosync.invalidate();
+  render();
+  return token;
+}
+async function bootstrap(): Promise<void> {
+  const callbackError = await finishPkceCallback();
+  if (callbackError) startupError = callbackError;
+  try {
+    const user = await currentUser();
+    const transition = beginProfileTransition(user ? { id: user.id, email: user.email, user_metadata: user.user_metadata } : null);
+    if (await activateProfile(transition.profile, transition) === "aborted") return;
+  } catch (error) {
+    startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`;
+    profileLoadFailed = true;
+    profileTransition = undefined;
+    data = { games: [] };
+    updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。");
+  }
+  render();
+  if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); }
+}
 void bootstrap();
 function processAuthSession(session: Session | null): void {
   const next = session?.user;
-  if (next?.id === activeUser?.id || (!next && !activeUser)) return;
-  const transition = ++profileGeneration;
-  conflictResolutionAbort?.abort();
-  pendingConflict = undefined;
-  autosync.invalidate();
+  if (next?.id === desiredUserId || (!next && desiredUserId === undefined && !profileTransition)) return;
+  const user = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
+  const transition = beginProfileTransition(user);
+  queuedAuthSession = session;
+  if (authTransitionRunning) return;
+  authTransitionRunning = true;
   void (async () => {
     try {
-      activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
-      activeProfile = next ? `user:${next.id}` : "guest";
-      if (await activateProfile(activeProfile, transition) === "aborted") return;
-      render();
-      if (activeUser) {
-        await prepareAccountProfile(activeUser.id, () => profileGeneration === transition);
-        if (profileGeneration === transition) void autosync.reconcile();
+      while (queuedAuthSession !== undefined) {
+        queuedAuthSession = undefined;
+        const current = profileTransition;
+        if (!current) break;
+        if (await activateProfile(current.profile, current) === "aborted") continue;
+        if (!profileTransition) {
+          render();
+          if (activeUser) {
+            await prepareAccountProfile(activeUser.id, () => profileGeneration === current.generation && !profileTransition);
+            if (profileGeneration === current.generation && !profileTransition) void autosync.reconcile();
+          }
+        }
       }
     } catch (error) {
-      if (profileGeneration !== transition) return;
-      profileLoadFailed = true;
-      updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。");
-      render();
+      if (profileTransition === transition) {
+        profileTransition = undefined;
+        profileLoadFailed = true;
+        data = { games: [] };
+        updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。");
+        render();
+      }
+    } finally {
+      authTransitionRunning = false;
+      if (queuedAuthSession !== undefined) processAuthSession(queuedAuthSession);
     }
   })();
 }
