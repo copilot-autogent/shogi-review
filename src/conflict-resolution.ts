@@ -160,6 +160,7 @@ export async function resolveConflict(
     await deps.metadata(identity.uid, metadata);
   } catch (error) {
     if (!ensureValid()) return abort();
+    deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: nextHash, cloudData: next, mergedData: next, conflicts: [] });
     throw error;
   }
   if (!ensureValid()) return abort();
