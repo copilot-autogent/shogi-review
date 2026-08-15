@@ -147,7 +147,7 @@ function answer(point: ReviewPoint): string {
 }
 
 export function renderReviewPage(vm: ReviewViewModel): string {
-  if (vm.status !== "ready" || !vm.game || !vm.point) return `<main class="review-page"><section class="panel" role="alert"><h1>${escapeReviewHtml(vm.reason ?? "複盤局面無效")}</h1><a class="button-link nav-link" href="#/games">返回棋局</a></section></main>`;
+  if (vm.status !== "ready" || !vm.game || !vm.point) return `<main class="review-page"><section class="panel" role="alert"><h1>${escapeReviewHtml(vm.reason ?? "複盤局面無效")}</h1><a class="button-link" href="#/games">返回棋局</a></section></main>`;
   const { game, point } = vm;
   const atAnchor = vm.phase === "anchor";
   const displaySfen = game.sfens[vm.displayedPly] ?? point.sfen;

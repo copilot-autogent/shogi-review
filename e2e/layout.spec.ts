@@ -37,7 +37,7 @@ async function assertContained(page: Page): Promise<void> {
 }
 
 async function assertTargets(page: Page): Promise<void> {
-  const smallTargets = await page.locator("button:not(.moves button), a.button-link, a.nav-link, summary, input[type=file] + *").evaluateAll((elements) => elements.map((element) => {
+  const smallTargets = await page.locator("button:not(.moves button), a.button-link, header a, a.nav-link, summary, input[type=file] + *").evaluateAll((elements) => elements.map((element) => {
     const box = element.getBoundingClientRect();
     return { width: box.width, height: box.height };
   }));
@@ -76,7 +76,7 @@ test("route shells remain contained at every required width", async ({ page }) =
     await page.goto("#/review/missing/long-invalid-id");
     await expect(page.locator('[role="alert"]')).toBeVisible();
     await assertContained(page);
-    await assertNavLink(page, "返回棋局", '[role="alert"] .nav-link');
+    await assertNavLink(page, "返回棋局", '[role="alert"] .button-link');
   }
 });
 
