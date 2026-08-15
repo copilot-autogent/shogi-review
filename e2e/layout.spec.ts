@@ -82,7 +82,7 @@ test("import, game, review reveal and continuation stay usable on a phone", asyn
   await expect(page.locator(".continuation")).toBeVisible();
   await assertContained(page);
   for (const target of await page.locator(".continuation button, .continuation a").all()) {
-    await target.scrollIntoViewIfNeeded();
+    await target.evaluate((element) => element.scrollIntoView({ block: "center", inline: "nearest" }));
     const overlap = await target.evaluate((element) => {
       const nav = document.querySelector<HTMLElement>(".review-navigation")!.getBoundingClientRect();
       const box = element.getBoundingClientRect();
