@@ -168,8 +168,16 @@ export class IndexedDbRepository implements Repository {
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
       let settled = false;
-      const abort = () => { if (!settled) transaction.abort(); };
-      if (!canCommit() || signal?.aborted) { abort(); settled = true; reject(new Error("同步身分已變更。")); return; }
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        try { transaction.abort(); } catch (error) {
+          if (!(error instanceof DOMException && error.name === "InvalidStateError")) { reject(error); return; }
+        }
+        reject(new Error("同步身分已變更。"));
+      };
+      if (!canCommit() || signal?.aborted) { abort(); return; }
       signal?.addEventListener("abort", abort, { once: true });
       transaction.objectStore("profiles").put(createBackup(data), profile);
       transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
