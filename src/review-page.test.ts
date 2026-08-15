@@ -11,10 +11,10 @@ const positions = [
   "9/9/9/9/9/9/9/9/9 w - 3",
   "9/9/9/9/9/9/9/9/9 b - 4",
 ];
-const game = (id: string, createdAt: string, pointIds: string[]): Game => ({
+const game = (id: string, createdAt: string, pointIds: string[], pointPlys = pointIds.map((_, index) => index + 1)): Game => ({
   id, title: `棋局 ${id}`, sourceFormat: "KIF", sourceText: "source", initialSfen: positions[0]!, sfens: positions,
   moves: ["一", "二", "三", "四", "五", "六"], canonicalHash: id, createdAt,
-  reviewPoints: pointIds.map((pointId, index) => ({ id: pointId, ply: index + 1, sfen: positions[index + 1]!, reason: "計算錯誤", issueTags: ["候選手"], note: `秘密答案-${pointId}`, externalNotes: `外部-${pointId}`, legacyNotes: `舊版-${pointId}`, createdAt })),
+  reviewPoints: pointIds.map((pointId, index) => ({ id: pointId, ply: pointPlys[index]!, sfen: positions[pointPlys[index]!]!, reason: "計算錯誤", issueTags: ["候選手"], note: `秘密答案-${pointId}`, externalNotes: `外部-${pointId}`, legacyNotes: `舊版-${pointId}`, createdAt })),
 });
 const state = (overrides: Partial<Parameters<typeof buildReviewViewModel>[2]> = {}) => ({ revealed: false, continuationOpen: false, displayedPly: 2, continuationPly: 2, ...overrides });
 
@@ -46,8 +46,57 @@ describe("dedicated review page seam", () => {
     expect(revealed).not.toContain("三");
     const continuation = renderReviewPage(buildReviewViewModel(data, route, state({ revealed: true, continuationOpen: true, continuationPly: 3 })));
     expect(continuation).toContain("三");
+    expect(continuation).toContain("實戰後續第 2 手");
+    expect(continuation).toContain("#/game/a?ply=3");
     const laterContinuation = renderReviewPage(buildReviewViewModel(data, route, state({ revealed: true, continuationOpen: true, continuationPly: 4 })));
     expect(laterContinuation).toContain("四");
+    expect(laterContinuation).toContain("實戰後續第 3 手");
+    expect(laterContinuation).toContain("#/game/a?ply=4");
+  });
+
+  it("separates history, anchor, and continuation phases at game boundaries", () => {
+    const data: AppData = { games: [game("a", "2026-01-01", ["start", "middle", "end"], [0, 3, 6])] };
+    const make = (pointId: string, overrides: Partial<Parameters<typeof buildReviewViewModel>[2]>) => buildReviewViewModel(
+      data,
+      parseReviewRoute(reviewRoute("a", pointId))!,
+      state(overrides),
+    );
+
+    const startHistory = make("start", { displayedPly: 0 });
+    expect(startHistory.phase).toBe("anchor");
+    expect(startHistory.displayedPly).toBe(0);
+    expect(renderReviewPage(startHistory)).toContain("儲存的決策局面");
+    expect(renderReviewPage(startHistory)).toContain("輪到先手");
+    const startContinuation = make("start", { revealed: true, continuationOpen: true, continuationPly: 1 });
+    expect(startContinuation.phase).toBe("continuation");
+    expect(startContinuation.displayedPly).toBe(1);
+    expect(renderReviewPage(startContinuation)).toContain("實戰後續第 1 手");
+    expect(renderReviewPage(startContinuation)).toContain("#/game/a?ply=1");
+    expect(renderReviewPage(startContinuation)).not.toContain("data-review-prev-history");
+    expect(renderReviewPage(startContinuation)).toContain("data-review-close-continuation");
+
+    const middleHistory = make("middle", { displayedPly: 2 });
+    expect(middleHistory.phase).toBe("history");
+    expect(middleHistory.displayedPly).toBe(2);
+    expect(renderReviewPage(middleHistory)).toContain("目前顯示的是決策局面之前的歷史");
+    expect(renderReviewPage(middleHistory)).toContain("輪到先手");
+    const middleAnchor = make("middle", { displayedPly: 3 });
+    expect(middleAnchor.phase).toBe("anchor");
+    expect(middleAnchor.displayedPly).toBe(3);
+    expect(renderReviewPage(middleAnchor)).toContain("儲存的決策局面");
+    expect(renderReviewPage(middleAnchor)).toContain("輪到後手");
+    const middleContinuation = make("middle", { revealed: true, continuationOpen: true, continuationPly: 4 });
+    expect(middleContinuation.phase).toBe("continuation");
+    expect(middleContinuation.displayedPly).toBe(4);
+    expect(renderReviewPage(middleContinuation)).toContain("實戰後續第 1 手");
+    expect(renderReviewPage(middleContinuation)).toContain("#/game/a?ply=4");
+
+    const end = make("end", { revealed: true, continuationOpen: true, displayedPly: 6, continuationPly: 7 });
+    expect(end.phase).toBe("anchor");
+    expect(end.continuationOpen).toBe(false);
+    expect(end.displayedPly).toBe(6);
+    expect(renderReviewPage(end)).toContain("這局在儲存局面後沒有更多實戰後續。");
+    expect(renderReviewPage(end)).not.toContain("實戰後續第");
   });
 
   it("clamps history to five plies and keeps anchor integrity explicit", () => {
