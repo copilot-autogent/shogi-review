@@ -262,7 +262,7 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
     dialogBusy = false;
     if (submit) submit.disabled = false;
     showError(error);
-    if (kind === "conflict" && pendingConflict) { closeDialog(); render(); }
+    if (kind === "conflict") { closeDialog(); render(); }
   }
 }
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }

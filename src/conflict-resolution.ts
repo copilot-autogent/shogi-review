@@ -109,7 +109,13 @@ export async function resolveConflict(
     deps.setPending({ ...conflict, localHash: latestLocalHash, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
-  const saved = await deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next));
+  let saved: Awaited<ReturnType<SyncRepository["casUpdate"]>>;
+  try {
+    saved = await deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next));
+  } catch (error) {
+    if (!ensureValid()) return abort();
+    throw error;
+  }
   // CAS may win immediately before logout; the post-CAS guard prevents that result
   // from crossing into the next profile's local, base, metadata, or UI state.
   if (!ensureValid()) return abort();
@@ -125,7 +131,15 @@ export async function resolveConflict(
   }
   if (!ensureValid()) return abort();
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
-  await deps.metadata(identity.uid, metadata);
+  try {
+    await deps.metadata(identity.uid, metadata);
+  } catch (error) {
+    if (!ensureValid()) return abort();
+    deps.setData(next);
+    if (!ensureValid()) return abort();
+    deps.setPending(undefined);
+    throw error;
+  }
   if (!ensureValid()) return abort();
   deps.setData(next);
   if (!ensureValid()) return abort();
