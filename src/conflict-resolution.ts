@@ -338,7 +338,10 @@ export function applyConflictChoice(target: AppData, local: AppData, cloud: AppD
     if (Array.isArray(sourceReviewPoint.issueTags) && sourceReviewPoint.issueTags.includes(tag)) point.issueTags.push(tag);
     point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
   }   else if (item.field.startsWith("recommendedMoves.")) {
-    const [, recommendationId, field] = item.field.split(".");
+    const prefix = "recommendedMoves.";
+    const suffix = item.field.endsWith(".__membership") ? ".__membership" : item.field.endsWith(".move") ? ".move" : ".comment";
+    const recommendationId = item.field.slice(prefix.length, -suffix.length);
+    const field = suffix.slice(1);
     const target = point.recommendedMoves ?? [];
     const sourceRecommendations = sourceReviewPoint.recommendedMoves ?? [];
     const sourceRecommendation = sourceRecommendations.find((candidate) => candidate.id === recommendationId);

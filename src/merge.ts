@@ -168,8 +168,12 @@ function mergeRecommendations(
     return item ? [item] : [];
   });
   const baseOrder = baseValue?.map((item) => item.id) ?? [];
-  const order = [...baseOrder.filter((id) => merged.some((item) => item.id === id)),
-    ...merged.map((item) => item.id).filter((id) => !baseOrder.includes(id)).sort()];
+  const localOrder = localValue?.map((item) => item.id) ?? [];
+  const cloudOrder = cloudValue?.map((item) => item.id) ?? [];
+  const same = (left: string[], right: string[]) => left.join("\u0000") === right.join("\u0000");
+  const preferred = same(localOrder, baseOrder) ? cloudOrder : same(cloudOrder, baseOrder) ? localOrder : localOrder.join("\u0000") <= cloudOrder.join("\u0000") ? localOrder : cloudOrder;
+  const order = [...preferred.filter((id) => merged.some((item) => item.id === id)),
+    ...merged.map((item) => item.id).filter((id) => !preferred.includes(id)).sort()];
   const ordered = order.flatMap((id) => merged.filter((item) => item.id === id));
   return ordered.length ? ordered : undefined;
 }

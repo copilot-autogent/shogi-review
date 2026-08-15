@@ -24,15 +24,7 @@ export function parseBackup(input: string): AppData {
 
 export function migrateData(value: unknown, version: number): AppData {
   if (!isRecord(value) || !Array.isArray(value.games)) throw new Error("備份資料結構不完整，未套用任何變更。");
-  if (version === 3) {
-    const data = globalThis.structuredClone(value) as unknown as AppData;
-    for (const game of data.games) for (const point of game.reviewPoints) {
-      const recommendations = normalizeRecommendedMoves(point.recommendedMoves);
-      if (recommendations === undefined) delete point.recommendedMoves;
-      else point.recommendedMoves = recommendations;
-    }
-    return data;
-  }
+  if (version === 3) return value as unknown as AppData;
   return { games: value.games.map((raw) => migrateGame(raw)) };
 }
 
@@ -109,6 +101,9 @@ export function validateData(data: AppData): void {
         typeof point.createdAt !== "string") {
         throw new Error("備份含有無效複盤欄位，未套用任何變更。");
       }
+      const recommendations = normalizeRecommendedMoves(point.recommendedMoves);
+      if (recommendations === undefined) delete point.recommendedMoves;
+      else point.recommendedMoves = recommendations;
       pointIds.add(point.id);
     }
   }
