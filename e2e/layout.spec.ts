@@ -1,5 +1,4 @@
 import { expect, test, type Page } from "@playwright/test";
-import { Buffer } from "node:buffer";
 
 const viewports = [
   { width: 320, height: 720 },
@@ -69,7 +68,9 @@ test("import, game, review reveal and continuation stay usable on a phone", asyn
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("#/import");
   await page.locator("#import-panel summary").click();
-  await page.locator("#file").setInputFiles({ name: "這是一個非常長的棋局標題，用來確認它不會把操作推到畫面之外.kif", mimeType: "text/plain", buffer: Buffer.from(kif) });
+  await page.locator("#title").fill("這是一個非常長的棋局標題，用來確認它不會把操作推到畫面之外");
+  await page.locator("#source").fill(kif);
+  await page.locator("#import").click();
   await expect(page.locator("h1")).toContainText("非常長");
   await page.locator("#reason").selectOption({ label: "計算錯誤" });
   await page.locator("#point-form button[type=submit]").click();
@@ -96,7 +97,9 @@ test("rename dialog follows kind focus policy, traps focus, and survives 200% zo
   await page.setViewportSize({ width: 320, height: 720 });
   await page.goto("#/import");
   await page.locator("#import-panel summary").click();
-  await page.locator("#file").setInputFiles({ name: "可供對話框測試的棋局.kif", mimeType: "text/plain", buffer: Buffer.from(kif) });
+  await page.locator("#title").fill("可供對話框測試的棋局");
+  await page.locator("#source").fill(kif);
+  await page.locator("#import").click();
   const rename = page.locator("[data-rename]");
   await rename.click();
   await expect(page.locator("[data-dialog]")).toBeVisible();
