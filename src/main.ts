@@ -7,7 +7,7 @@ import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import { AuthTransitionGate, drainLatestAuthTransitions, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
-import { buildReviewViewModel, parseReviewRoute, renderReviewPage, reviewEntries, reviewRoute, type ReviewEntry, type ReviewState } from "./review-page.js";
+import { buildReviewViewModel, findReviewEntry, parseReviewRoute, renderReviewPage, reviewEntries, reviewRoute, type ReviewEntry, type ReviewState } from "./review-page.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -172,6 +172,8 @@ function render(): void {
     renderReview(reviewRouteValue);
     return;
   }
+  reviewIdentity = "";
+  reviewNavigation = undefined;
   if (route.startsWith("#/game/")) {
     const [rawId, query = ""] = route.slice(7).split("?"); let id = "";
     try { id = decodeURIComponent(rawId ?? ""); } catch { location.hash = "#/"; return; }
@@ -213,7 +215,9 @@ function renderGame(game: Game): void {
   document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game)); document.querySelector("#download-kifu")?.addEventListener("click", () => downloadKifu(game.sourceText, game.sourceFormat, game.title));
 }
 function renderReview(route: NonNullable<ReturnType<typeof parseReviewRoute>>): void {
-  const found = route.kind === "invalid" ? undefined : reviewEntries(data).find(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
+  const currentEntries = reviewEntries(data);
+  const foundResult = route.kind === "invalid" ? { entry: undefined } : findReviewEntry(data, route);
+  const found = foundResult.entry;
   const identity = found ? `${found.game.id}/${found.point.id}` : location.hash;
   if (identity !== reviewIdentity) {
     reviewState = { revealed: false, continuationOpen: false, displayedPly: found?.point.ply ?? 0, continuationPly: found?.point.ply ?? 0 };
@@ -221,7 +225,8 @@ function renderReview(route: NonNullable<ReturnType<typeof parseReviewRoute>>): 
     reviewIdentity = identity;
   }
   const orientation = found && temporaryFlip?.gameId === found.game.id ? (temporaryFlip.flipped ? "flipped" : "normal") : found ? defaultOrientation(found.game) : "normal";
-  const vm = buildReviewViewModel(data, route, reviewState, reviewNavigation, orientation);
+  const activeEntries = reviewNavigation?.map(({ game, point }) => currentEntries.find((entry) => entry.game.id === game.id && entry.point.id === point.id)).filter((entry): entry is ReviewEntry => Boolean(entry));
+  const vm = buildReviewViewModel(data, route, reviewState, activeEntries, orientation);
   app!.innerHTML = `${header()}${renderReviewPage(vm)}`;
   bindCommon();
   document.querySelectorAll<HTMLElement>("[data-review-flip]").forEach((element) => element.addEventListener("click", () => {
@@ -259,8 +264,11 @@ function renderReview(route: NonNullable<ReturnType<typeof parseReviewRoute>>): 
 function navigateReview(direction: -1 | 1): void {
   const route = parseReviewRoute(location.hash);
   if (!route || route.kind === "invalid") return;
-  const current = reviewEntries(data).findIndex(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
-  const entries = reviewNavigation?.length ? reviewNavigation : reviewEntries(data);
+  const currentEntries = reviewEntries(data);
+  const current = currentEntries.findIndex(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
+  const entries = reviewNavigation?.length
+    ? reviewNavigation.map(({ game, point }) => currentEntries.find((entry) => entry.game.id === game.id && entry.point.id === point.id)).filter((entry): entry is ReviewEntry => Boolean(entry))
+    : currentEntries;
   const activeIndex = entries.findIndex(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
   const index = activeIndex >= 0 ? activeIndex : current;
   const next = entries[index + direction];

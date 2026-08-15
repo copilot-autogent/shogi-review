@@ -38,15 +38,15 @@ export function escapeReviewHtml(value: string): string {
 
 export function parseReviewRoute(hash: string): ReviewRoute | null {
   if (!hash.startsWith("#/review/")) return null;
-  const parts = hash.slice("#/review/".length).split("/").filter((part): part is string => Boolean(part));
-  if (parts.length === 2) {
+  const parts = hash.slice("#/review/".length).split("/");
+  if (parts.length === 2 && parts.every((part) => part.length > 0)) {
     try {
       return { kind: "review", gameId: decodeURIComponent(parts[0]!), pointId: decodeURIComponent(parts[1]!) };
     } catch {
       return { kind: "invalid", reason: "malformed" };
     }
   }
-  if (parts.length === 1) {
+  if (parts.length === 1 && parts[0]) {
     try { return { kind: "legacy", pointId: decodeURIComponent(parts[0]!) }; } catch { return { kind: "invalid", reason: "malformed" }; }
   }
   return { kind: "invalid", reason: "malformed" };
@@ -107,6 +107,20 @@ function pieceName(piece: string, promoted: boolean): string {
   return (promoted ? PROMOTED[piece.toUpperCase()] : PIECES[piece.toUpperCase()]) ?? piece;
 }
 
+function hands(sfen: string, side: "gote" | "sente", orientation: BoardOrientation): string {
+  const hand = sfen.split(" ")[2] ?? "-";
+  const counts = new Map<string, number>();
+  let multiplier = 0;
+  for (const char of hand) {
+    if (/\d/.test(char)) { multiplier = multiplier * 10 + Number(char); continue; }
+    const isGote = char === char.toLowerCase();
+    if (char !== "-" && isGote === (side === "gote")) counts.set(char.toUpperCase(), (counts.get(char.toUpperCase()) ?? 0) + (multiplier || 1));
+    multiplier = 0;
+  }
+  const rotated = orientation === "normal" ? side === "gote" : side === "sente";
+  return [...counts.entries()].map(([piece, count]) => `<span class="hand-piece${rotated ? " rotated" : ""}">${pieceName(piece, false)}${count > 1 ? `<b aria-label="${count}枚">×${count}</b>` : ""}</span>`).join("") || "<span class=\"empty-hand\">なし</span>";
+}
+
 function board(sfen: string, orientation: BoardOrientation): string {
   const view = boardView(sfen, orientation);
   if (!view) return `<p class="error">此局面無法安全顯示。</p>`;
@@ -115,7 +129,7 @@ function board(sfen: string, orientation: BoardOrientation): string {
     const owner = cell.piece === cell.piece.toUpperCase() ? "sente" : "gote";
     return `<span class="square piece ${owner}${pieceRotated(cell.piece, orientation) ? " rotated" : ""}${cell.promoted ? " promoted" : ""}">${pieceName(cell.piece, Boolean(cell.promoted))}</span>`;
   }).join("");
-  const hand = (owner: "gote" | "sente") => `<div class="hand" aria-label="${owner === "gote" ? "後手持駒" : "先手持駒"}" role="region" tabindex="0"><span class="hand-label">${owner === "gote" ? "後手持駒" : "先手持駒"}</span></div>`;
+  const hand = (owner: "gote" | "sente") => `<div class="hand" aria-label="${owner === "gote" ? "後手持駒" : "先手持駒"}" role="region" tabindex="0"><span class="hand-label">${owner === "gote" ? "後手持駒" : "先手持駒"}</span>${hands(sfen, owner, orientation)}</div>`;
   const turn = (sfen.split(" ")[1] ?? "b") === "w" ? "輪到後手" : "輪到先手";
   return `<div class="position" data-orientation="${orientation}"><div class="orientation-toolbar"><span role="status" aria-live="polite">${turn}</span><button type="button" class="secondary" data-review-flip aria-label="翻轉棋盤" aria-pressed="${orientation === "flipped"}">翻轉棋盤</button></div>${hand(view.topHandOwner)}<div class="board" aria-label="將棋盤">${cells}</div>${hand(view.bottomHandOwner)}</div>`;
 }
@@ -130,10 +144,10 @@ export function renderReviewPage(vm: ReviewViewModel): string {
   const atAnchor = vm.displayedPly === point.ply;
   const displaySfen = game.sfens[vm.displayedPly] ?? point.sfen;
   const historyStart = Math.max(0, point.ply - 5);
-  const history = game.moves.slice(historyStart, point.ply).map((move, index) => `<li><button type="button" data-review-history="${historyStart + index}">${escapeReviewHtml(move)}</button></li>`).join("");
+  const history = game.moves.slice(historyStart, point.ply).map((move, index) => `<li><button type="button" data-review-history="${historyStart + index + 1}">${escapeReviewHtml(move)}</button></li>`).join("");
   const continuation = vm.continuationOpen
     ? `<section class="panel continuation"><h2>實戰後續</h2><p>這裡是實戰後續第 ${Math.max(1, vm.continuationPly - point.ply)} 手。</p><ol class="moves">${game.moves.slice(point.ply, vm.continuationPly).map((move) => `<li>${escapeReviewHtml(move)}</li>`).join("")}</ol><a class="button-link" href="#/game/${encodeURIComponent(game.id)}?ply=${point.ply}">在原棋局繼續查看</a></section>`
     : "";
   const revealed = vm.revealed ? `${answer(point)}${vm.continuationOpen ? continuation : point.ply < game.moves.length ? `<button type="button" data-review-continuation>查看實戰後續</button>` : "<p class=\"muted\">這局在儲存局面後沒有更多實戰後續。</p>"}` : `<button type="button" data-review-reveal>揭示記錄</button>`;
-  return `<main class="review-page"><div class="review-header"><a href="#/games">← 棋局</a><p class="muted">${escapeReviewHtml(game.title)} · 第 ${point.ply} 手後</p><h1>重新思考</h1><p role="status" aria-live="polite">複盤進度 ${Math.max(0, vm.index + 1)} / ${vm.entries.length}</p></div><section class="panel review-study">${board(displaySfen, vm.orientation)}<p class="review-anchor-status" role="status">${atAnchor ? "儲存的決策局面" : "目前顯示的是決策局面之前的歷史"}</p><ol class="moves">${history}</ol><div class="replay-controls"><button type="button" data-review-prev-history ${!historyStart ? "disabled" : ""}>上一個歷史局面</button><button type="button" data-review-anchor ${atAnchor ? "disabled" : ""}>回到決策局面</button></div><p>如果再次遇到這個局面，你會怎麼想？</p>${revealed}</section><nav class="review-navigation" aria-label="複盤局面導航"><button type="button" data-review-prev ${vm.index <= 0 ? "disabled" : ""}>上一個複盤局面</button><button type="button" data-review-next ${vm.index < 0 || vm.index >= vm.entries.length - 1 ? "disabled" : ""}>下一個複盤局面</button></nav></main>`; 
+  return `<main class="review-page"><div class="review-header"><a href="#/games">← 棋局</a><p class="muted">${escapeReviewHtml(game.title)} · 第 ${point.ply} 手後</p><h1>重新思考</h1><p role="status" aria-live="polite">複盤進度 ${Math.max(0, vm.index + 1)} / ${vm.entries.length}</p></div><section class="panel review-study">${board(displaySfen, vm.orientation)}<p class="review-anchor-status" role="status">${atAnchor ? "儲存的決策局面" : "目前顯示的是決策局面之前的歷史"}</p><ol class="moves">${history}</ol><div class="replay-controls"><button type="button" data-review-prev-history ${vm.displayedPly <= historyStart ? "disabled" : ""}>上一個歷史局面</button><button type="button" data-review-anchor ${atAnchor ? "disabled" : ""}>回到決策局面</button></div><p>如果再次遇到這個局面，你會怎麼想？</p>${revealed}</section><nav class="review-navigation" aria-label="複盤局面導航"><button type="button" data-review-prev ${vm.index <= 0 ? "disabled" : ""}>上一個複盤局面</button><button type="button" data-review-next ${vm.index < 0 || vm.index >= vm.entries.length - 1 ? "disabled" : ""}>下一個複盤局面</button></nav></main>`;
 }
