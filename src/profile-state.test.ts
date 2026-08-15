@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "@supabase/supabase-js";
-import { AuthTransitionGate, isCurrentProfileActivation, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
+import { AuthTransitionGate, drainLatestAuthTransitions, isCurrentProfileActivation, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 
 describe("profile transition state", () => {
   it("coalesces same-UID token refresh until account removal finishes", () => {
@@ -33,6 +33,45 @@ describe("profile transition state", () => {
     generation = 2;
     release("old profile");
     await expect(oldLoad).resolves.toBeUndefined();
+  });
+
+  it("drains a queued same-identity transition after an earlier activation rejects", async () => {
+    let queued: string | undefined = "A";
+    let releaseA!: () => void;
+    const first = new Promise<void>((resolve) => { releaseA = resolve; });
+    const activated: string[] = [];
+    const operation = drainLatestAuthTransitions(
+      () => queued !== undefined,
+      () => { const next = queued; queued = undefined; return next; },
+      async (next) => {
+        if (next === "A") {
+          releaseA();
+          queued = "B";
+          await first;
+          throw new Error("A failed");
+        }
+        activated.push(next);
+      },
+    );
+    await operation;
+    expect(activated).toEqual(["B"]);
+  });
+
+  it("drains a queued different-identity transition after an earlier activation rejects", async () => {
+    let queued: string | undefined = "old";
+    const activated: string[] = [];
+    await drainLatestAuthTransitions(
+      () => queued !== undefined,
+      () => { const next = queued; queued = undefined; return next; },
+      async (next) => {
+        if (next === "old") {
+          queued = "new";
+          throw new Error("old failed");
+        }
+        activated.push(next);
+      },
+    );
+    expect(activated).toEqual(["new"]);
   });
 
   it("settles profile cleanup when profile deletion fails", async () => {

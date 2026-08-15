@@ -6,7 +6,7 @@ import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRe
 import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
-import { AuthTransitionGate, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
+import { AuthTransitionGate, drainLatestAuthTransitions, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -22,6 +22,7 @@ let profileTransition: ProfileTransition | undefined;
 let desiredUserId: string | undefined;
 let queuedAuthSession: Session | null | undefined;
 let authTransitionRunning = false;
+let activeAuthSession: Session | null | undefined;
 let profileLoadFailed = false;
 let selectedGame: Game | undefined;
 let selectedPly = 0;
@@ -523,29 +524,41 @@ async function bootstrap(): Promise<void> {
 void bootstrap();
 function processAuthSession(session: Session | null): void {
   const next = session?.user;
-  if (next?.id === desiredUserId || (!next && desiredUserId === undefined && !profileTransition)) return;
+  const alreadyActivated = !profileTransition
+    && (next?.id === activeUser?.id || (!next && !activeUser));
+  if (alreadyActivated || (authTransitionRunning && session === activeAuthSession)) return;
   const user = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null;
   const transition = beginProfileTransition(user);
   queuedAuthSession = session;
   if (authTransitionRunning) return;
   authTransitionRunning = true;
   void (async () => {
+    let failedTransition = transition;
     try {
-      while (queuedAuthSession !== undefined) {
-        queuedAuthSession = undefined;
-        const current = profileTransition;
-        if (!current) break;
-        if (await activateProfile(current.profile, current) === "aborted") continue;
-        if (!profileTransition) {
-          render();
-          if (activeUser) {
-            await prepareAccountProfile(activeUser.id, () => profileGeneration === current.generation && !profileTransition);
-            if (profileGeneration === current.generation && !profileTransition) void autosync.reconcile();
+      await drainLatestAuthTransitions(
+        () => queuedAuthSession !== undefined,
+        () => {
+          const sessionToActivate = queuedAuthSession;
+          queuedAuthSession = undefined;
+          activeAuthSession = sessionToActivate;
+          return sessionToActivate;
+        },
+        async () => {
+          const current = profileTransition;
+          if (!current) return;
+          failedTransition = current;
+          if (await activateProfile(current.profile, current) === "aborted") return;
+          if (!profileTransition) {
+            render();
+            if (activeUser) {
+              await prepareAccountProfile(activeUser.id, () => profileGeneration === current.generation && !profileTransition);
+              if (profileGeneration === current.generation && !profileTransition) void autosync.reconcile();
+            }
           }
-        }
-      }
+        },
+      );
     } catch (error) {
-      if (profileTransition === transition) {
+      if (profileTransition === failedTransition) {
         profileTransition = undefined;
         profileLoadFailed = true;
         data = { games: [] };
@@ -553,6 +566,7 @@ function processAuthSession(session: Session | null): void {
         render();
       }
     } finally {
+      activeAuthSession = undefined;
       authTransitionRunning = false;
       if (queuedAuthSession !== undefined) processAuthSession(queuedAuthSession);
     }

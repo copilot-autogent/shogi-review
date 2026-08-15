@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createBackup } from "./backup.js";
+import { parseGame } from "./parser.js";
 import { resolveConflict, type ConflictResolutionDependencies } from "./conflict-resolution.js";
 import type { AppData } from "./model.js";
 import type { PendingConflict, SyncIdentity } from "./sync.js";
@@ -107,6 +108,67 @@ describe("identity-scoped conflict resolution", () => {
     state.deps.setPending({ ...state.deps.pending()!, localHash: await hashEmpty() });
     expect(await resolveConflict({}, state.deps)).toBe("aborted");
     expect(state.writes).toEqual([]);
+  });
+
+  it("recovers local persistence after CAS without issuing a second CAS", async () => {
+    let casCalls = 0;
+    let saveCalls = 0;
+    const state = harness({
+      repository: {
+        saveProfileAndBase: async (profile, data, base, canCommit, signal) => {
+          saveCalls += 1;
+          if (saveCalls === 1) throw new Error("local save failed");
+          await new Promise<void>((resolve, reject) => {
+            if (!canCommit() || signal.aborted) { reject(new Error("aborted")); return; }
+            resolve();
+          });
+          state.writes.push(`profile-base:${profile}`);
+          void data; void base;
+        },
+      },
+      cloud: {
+        read: async () => casCalls ? casSaved : saved,
+        insert: async () => saved,
+        casUpdate: async () => { casCalls += 1; return casSaved; },
+      },
+    });
+    state.start();
+    state.deps.setPending({ ...state.deps.pending()!, localHash: await hashEmpty() });
+    await expect(resolveConflict({}, state.deps)).rejects.toThrow("local save failed");
+    expect(casCalls).toBe(1);
+    await expect(resolveConflict({}, state.deps)).resolves.toBe("resolved");
+    expect(casCalls).toBe(1);
+    expect(state.deps.pending()).toBeUndefined();
+  });
+
+  it("reports a local edit during recovery without reverting committed cloud data", async () => {
+    let casCalls = 0;
+    let saveCalls = 0;
+    const state = harness({
+      repository: {
+        saveProfileAndBase: async () => {
+          saveCalls += 1;
+          if (saveCalls === 1) throw new Error("local save failed");
+        },
+      },
+      cloud: {
+        read: async () => casCalls ? casSaved : saved,
+        insert: async () => saved,
+        casUpdate: async () => { casCalls += 1; return casSaved; },
+      },
+    });
+    state.start();
+    state.deps.setPending({ ...state.deps.pending()!, localHash: await hashEmpty() });
+    await expect(resolveConflict({}, state.deps)).rejects.toThrow("local save failed");
+    state.deps.setData({ games: [parseGame(`手合割：平手
+先手：A
+後手：B
+
+   1 ７六歩(77)
+`, "KIF", "local edit")] });
+    await expect(resolveConflict({}, state.deps)).rejects.toThrow("本機資料已更新");
+    expect(casCalls).toBe(1);
+    expect(state.deps.pending()?.conflicts).toHaveLength(1);
   });
 
   it("stops the remaining commits when identity changes at each durable boundary", async () => {

@@ -67,6 +67,59 @@ export async function resolveConflict(
   }
   const local = readLocal();
   const latestCloud = validateCloudPayload(latest.payload);
+  const recovery = initialConflict.localRecovery;
+  if (recovery) {
+    if (latest.revision !== recovery.revision || canonicalData(latestCloud) !== canonicalData(recovery.committedData)) {
+      throw new Error("雲端資料已在本機復原前變更，未覆蓋本機資料。");
+    }
+    const currentHash = await payloadHash(local);
+    if (!ensureValid()) return abort();
+    if (currentHash !== recovery.expectedLocalHash) {
+      const refreshed = mergeAppData(recovery.committedData, local, recovery.committedData);
+      const conflicts = refreshed.conflicts.length ? refreshed.conflicts : [{
+        entity: "game" as const,
+        entityId: "*",
+        field: "*",
+        path: "library",
+        base: recovery.committedData,
+        local,
+        cloud: recovery.committedData,
+        reason: "membership" as const,
+      }];
+      if (!ensureValid()) return abort();
+      deps.setPending({
+        ...initialConflict,
+        baseData: recovery.committedData,
+        rowRevision: recovery.revision,
+        localHash: currentHash,
+        cloudData: recovery.committedData,
+        mergedData: refreshed.data,
+        conflicts,
+        localRecovery: undefined,
+      });
+      throw new Error("本機資料已更新，雲端變更已保留；請重新確認衝突。");
+    }
+    const base: SyncBaseRecord = { data: recovery.committedData, revision: recovery.revision, payloadHash: recovery.payloadHash, hashVersion: 1 };
+    try {
+      await deps.repository.saveProfileAndBase(identity.profile, recovery.committedData, base, () => ensureValid() && deps.localVersion() === localVersion, deps.signal);
+    } catch (error) {
+      if (!ensureValid()) return abort();
+      throw error;
+    }
+    if (!ensureValid()) return abort();
+    deps.setData(recovery.committedData);
+    const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: recovery.revision, lastSyncedPayloadHash: recovery.payloadHash, hashVersion: 1 };
+    try {
+      await deps.metadata(identity.uid, metadata);
+    } catch (error) {
+      if (!ensureValid()) return abort();
+      throw error;
+    }
+    if (!ensureValid()) return abort();
+    deps.setPending(undefined);
+    deps.onResolved();
+    return "resolved";
+  }
   if (latest.revision !== conflict.rowRevision) {
     const currentHash = await payloadHash(local);
     if (!ensureValid()) return abort();
@@ -159,7 +212,16 @@ export async function resolveConflict(
     await deps.repository.saveProfileAndBase(identity.profile, next, base, () => ensureValid() && deps.localVersion() === localVersion, deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
-    deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: nextHash, cloudData: next, mergedData: next, conflicts: [] });
+    deps.setPending({
+      ...conflict,
+      baseData: next,
+      rowRevision: saved.revision,
+      localHash,
+      cloudData: next,
+      mergedData: next,
+      conflicts: [],
+      localRecovery: { expectedLocalHash: localHash, committedData: next, revision: saved.revision, payloadHash: nextHash },
+    });
     throw error;
   }
   if (!ensureValid()) return abort();

@@ -45,6 +45,12 @@ export interface PendingConflict {
   cloudData: AppData;
   mergedData: AppData;
   conflicts: MergeConflict[];
+  localRecovery?: {
+    expectedLocalHash: string;
+    committedData: AppData;
+    revision: number;
+    payloadHash: string;
+  };
 }
 export interface SyncEngineOptions {
   identity: () => SyncIdentity | null;

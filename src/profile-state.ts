@@ -48,6 +48,23 @@ export async function loadProfileIfCurrent<T>(load: () => Promise<T>, isCurrent:
   return isCurrent() ? loaded : undefined;
 }
 
+export async function drainLatestAuthTransitions<T>(
+  hasQueued: () => boolean,
+  takeQueued: () => T | undefined,
+  activate: (request: T) => Promise<void>,
+): Promise<void> {
+  while (hasQueued()) {
+    const request = takeQueued();
+    if (request === undefined) continue;
+    try {
+      await activate(request);
+    } catch (error) {
+      if (hasQueued()) continue;
+      throw error;
+    }
+  }
+}
+
 export async function settleAccountCleanup(
   cleanup: readonly (() => Promise<void>)[],
 ): Promise<unknown[]> {
