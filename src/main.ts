@@ -23,6 +23,7 @@ let renderedRoute = "";
 let syncStatus: SyncStatus = "僅本機";
 let syncMessage = "";
 let syncMetadata: SyncMetadata = { hashVersion: 1 };
+let localDataVersion = 0;
 let pendingConflict: PendingConflict | undefined;
 let dialogBusy = false;
 let conflictResolutionRunning = false;
@@ -280,7 +281,7 @@ async function savePoint(event: Event, game: Game): Promise<void> { const form =
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 async function deletePoint(id?: string): Promise<void> { const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { game.reviewPoints = previous; throw error; } }
 async function deleteGame(id?: string): Promise<void> { const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { data.games = previous; throw error; } location.hash = "#/games"; }
-async function persist(): Promise<void> { await repo.saveProfile(activeProfile, data); if (activeUser && !profileLoadFailed && !pendingConflict) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
+async function persist(): Promise<void> { localDataVersion += 1; await repo.saveProfile(activeProfile, data); if (activeUser && !profileLoadFailed && !pendingConflict) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
 async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
 function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.body.classList.add("dialog-lock"); const cancel = document.querySelector<HTMLElement>("[data-dialog] [data-dialog-cancel]"); if (cancel) cancel.focus(); }
 async function startGoogleLoginFromUi(): Promise<void> { try { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } } catch (error) { syncMessage = error instanceof Error ? error.message : "Google 登入啟動失敗，請重試。"; render(); } }
@@ -377,6 +378,7 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
       },
       onResolved: () => updateSyncStatus("已同步"),
       signal: abortController.signal,
+      localVersion: () => localDataVersion,
     });
     if (result === "aborted") return;
   } finally {

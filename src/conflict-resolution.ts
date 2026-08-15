@@ -15,6 +15,7 @@ export interface ConflictResolutionDependencies {
   metadata: (uid: string, value: SyncSnapshot) => Promise<void> | void;
   onResolved: () => void;
   signal: AbortSignal;
+  localVersion: () => number;
 }
 
 export type ConflictResolutionResult = "resolved" | "aborted";
@@ -31,6 +32,7 @@ export async function resolveConflict(
   }
   const identity = { ...initialIdentity };
   const conflict = initialConflict;
+  const localVersion = deps.localVersion();
   const valid = (): boolean => {
     const current = deps.identity();
     const pending = deps.pending();
@@ -153,6 +155,7 @@ export async function resolveConflict(
     deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: savedLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
+  if (deps.localVersion() !== localVersion) return abort();
   deps.setData(next);
   if (!ensureValid()) return abort();
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
