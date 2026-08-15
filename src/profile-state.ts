@@ -47,3 +47,20 @@ export async function loadProfileIfCurrent<T>(load: () => Promise<T>, isCurrent:
   const loaded = await load();
   return isCurrent() ? loaded : undefined;
 }
+
+export async function settleAccountCleanup(
+  cleanup: readonly (() => Promise<void>)[],
+): Promise<unknown[]> {
+  const results = await Promise.allSettled(cleanup.map((operation) => operation()));
+  return results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+}
+
+export async function loadGuestSafely<T>(
+  load: () => Promise<T>,
+): Promise<{ data: T } | { error: unknown }> {
+  try {
+    return { data: await load() };
+  } catch (error) {
+    return { error };
+  }
+}

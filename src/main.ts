@@ -6,7 +6,7 @@ import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRe
 import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
-import { AuthTransitionGate, isCurrentProfileActivation, loadProfileIfCurrent } from "./profile-state.js";
+import { AuthTransitionGate, isCurrentProfileActivation, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -310,28 +310,56 @@ async function removeLocalAccount(): Promise<void> {
   }
   try {
     if (!authTransitionGate.isCurrentRemoval(removalToken)) return;
-    await repo.deleteSyncBase(`user:${uid}`);
-    if (!authTransitionGate.isCurrentRemoval(removalToken)) return;
-    await repo.deleteProfile(`user:${uid}`);
-    if (!authTransitionGate.isCurrentRemoval(removalToken)) return;
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
-    if (await activateProfile("guest") === "aborted") return;
+    pendingGuestImport = undefined;
+    profileLoadFailed = false;
+    data = { games: [] };
+    selectedGame = undefined;
+    syncMetadata = { hashVersion: 1 };
     updateSyncStatus("僅本機");
     render();
+
+    const cleanupErrors = await settleAccountCleanup([
+      () => repo.deleteProfile(`user:${uid}`),
+      () => repo.deleteSyncBase(`user:${uid}`),
+    ]);
+    activeUser = null;
+    activeProfile = "guest";
+    pendingConflict = undefined;
+    const guestLoad = await loadGuestSafely(() => repo.loadProfile("guest"));
+    if ("error" in guestLoad) {
+      profileLoadFailed = true;
+      data = { games: [] };
+      startupError = guestLoad.error instanceof Error ? guestLoad.error.message : "訪客資料載入失敗。";
+    } else {
+      data = guestLoad.data.data;
+      profileLoadFailed = false;
+      startupError = "";
+    }
+    const cleanupDetails = cleanupErrors
+      .map((cleanupError) => cleanupError instanceof Error ? cleanupError.message : String(cleanupError))
+      .join("；");
+    if (cleanupErrors.length) {
+      const warning = `部分本機帳號資料可能仍留在裝置上，但已隱藏；雲端未受影響。${cleanupDetails ? ` 清理錯誤：${cleanupDetails}` : ""}`;
+      startupError = startupError ? `${startupError} ${warning}` : warning;
+    }
+    if ("error" in guestLoad || cleanupErrors.length) {
+      updateSyncStatus("離線／同步失敗", startupError);
+    } else {
+      updateSyncStatus("僅本機");
+    }
+    render();
+    if ("error" in guestLoad || cleanupErrors.length) throw new Error(startupError);
   } catch (error) {
     if (!authTransitionGate.isCurrentRemoval(removalToken)) throw error;
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
-    await repo.deleteProfile(`user:${uid}`);
-    await repo.deleteSyncBase(`user:${uid}`);
-    const guest = await repo.loadProfile("guest");
-    data = guest.data;
-    syncMetadata = { hashVersion: 1 };
-    profileLoadFailed = false;
-    updateSyncStatus("僅本機");
+    data = { games: [] };
+    profileLoadFailed = true;
+    updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "帳號資料移除失敗。");
     render();
     throw error;
   } finally {

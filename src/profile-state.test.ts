@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "@supabase/supabase-js";
-import { AuthTransitionGate, isCurrentProfileActivation, loadProfileIfCurrent } from "./profile-state.js";
+import { AuthTransitionGate, isCurrentProfileActivation, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 
 describe("profile transition state", () => {
   it("coalesces same-UID token refresh until account removal finishes", () => {
@@ -33,5 +33,44 @@ describe("profile transition state", () => {
     generation = 2;
     release("old profile");
     await expect(oldLoad).resolves.toBeUndefined();
+  });
+
+  it("settles profile cleanup when profile deletion fails", async () => {
+    const errors = await settleAccountCleanup([
+      async () => { throw new Error("profile delete failed"); },
+      async () => undefined,
+    ]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: "profile delete failed" });
+  });
+
+  it("settles profile cleanup when metadata deletion fails", async () => {
+    const errors = await settleAccountCleanup([
+      async () => undefined,
+      async () => { throw new Error("metadata delete failed"); },
+    ]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: "metadata delete failed" });
+  });
+
+  it("preserves both independent cleanup failures", async () => {
+    const errors = await settleAccountCleanup([
+      async () => { throw new Error("profile delete failed"); },
+      async () => { throw new Error("metadata delete failed"); },
+    ]);
+    expect(errors.map((error) => (error as Error).message)).toEqual([
+      "profile delete failed",
+      "metadata delete failed",
+    ]);
+  });
+
+  it("completes normal cleanup without errors", async () => {
+    await expect(settleAccountCleanup([async () => undefined, async () => undefined])).resolves.toEqual([]);
+  });
+
+  it("keeps guest data empty when guest loading fails", async () => {
+    const guestLoad = await loadGuestSafely(async () => { throw new Error("guest load failed"); });
+    expect("error" in guestLoad).toBe(true);
+    expect((guestLoad as { error: Error }).error.message).toBe("guest load failed");
   });
 });
