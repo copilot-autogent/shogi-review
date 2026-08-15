@@ -106,11 +106,15 @@ test("rename dialog follows kind focus policy, traps focus, and survives 200% zo
   await page.evaluate(() => { document.documentElement.style.zoom = "2"; });
   const dialog = page.locator("[data-dialog] .dialog");
   await expect(dialog).toBeVisible();
-  expect(await dialog.evaluate((element) => element.scrollHeight >= element.clientHeight)).toBe(true);
+  expect(await dialog.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  const focusSequence: boolean[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    await page.keyboard.press("Tab");
+    focusSequence.push(await page.evaluate(() => Boolean(document.activeElement?.closest("[data-dialog]"))));
+  }
+  expect(focusSequence).toEqual([true, true, true]);
   await page.keyboard.press("Tab");
-  await page.keyboard.press("Tab");
-  await page.keyboard.press("Tab");
-  await expect(page.locator("[data-dialog]")).toContainText("取消");
+  await expect(page.locator("[data-dialog-cancel]")).toBeFocused();
   await page.locator("[data-dialog-cancel]").click();
   await expect(rename).toBeFocused();
 });
