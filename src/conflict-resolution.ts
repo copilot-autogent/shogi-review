@@ -111,7 +111,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   }
   const gameId = item.entity === "review" ? item.entityId.slice(0, item.entityId.lastIndexOf(":")) : item.entityId;
   const game = target.games.find((candidate) => candidate.id === gameId);
-  const sourceGame = source.games.find((candidate) => candidate.id === item.entityId || item.entityId.startsWith(`${candidate.id}:`));
+  const sourceGame = source.games.find((candidate) => candidate.id === gameId);
   if (item.entity === "game") {
     if (!sourceGame) {
       if (item.field === "__membership" || item.field === "identity") target.games = target.games.filter((candidate) => candidate.id !== gameId);
