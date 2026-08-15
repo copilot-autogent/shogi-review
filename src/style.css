@@ -18,6 +18,7 @@ header a { color: #fff; }
 .header-inner, .account, .brand { display: flex; align-items: center; min-width: 0; }
 .header-inner { justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .brand { color: #fff; text-decoration: none; gap: .6rem; min-height: 44px; }
+.nav-link { display: inline-flex; align-items: center; min-width: 44px; min-height: 44px; padding: .45rem .55rem; }
 .brand strong, .brand span, .account, .account > span { overflow-wrap: anywhere; }
 .account > span { min-width: 0; }
 .brand span, .sync-copy { display: block; font-size: .82rem; opacity: .85; }
