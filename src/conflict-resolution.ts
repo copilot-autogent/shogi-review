@@ -90,7 +90,7 @@ export async function resolveConflict(
   const selectedChoices = Object.entries(choices).sort(([left], [right]) => {
     const leftItem = conflict.conflicts[Number(left)];
     const rightItem = conflict.conflicts[Number(right)];
-    return Number(rightItem?.entity === "review") - Number(leftItem?.entity === "review");
+    return Number(leftItem?.entity === "review") - Number(rightItem?.entity === "review");
   });
   for (const [index, selected] of selectedChoices) {
     const item = conflict.conflicts[Number(index)];
@@ -121,7 +121,15 @@ export async function resolveConflict(
   if (!ensureValid()) return abort();
   const afterCasLocalHash = await payloadHash(readLocal());
   if (!ensureValid()) return abort();
-  if (afterCasLocalHash !== localHash) return abort();
+  if (afterCasLocalHash !== localHash) {
+    const latestLocal = readLocal();
+    const refreshed = conflict.baseData
+      ? mergeAppData(conflict.baseData, latestLocal, next)
+      : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: next, reason: "membership" as const })) };
+    if (!ensureValid()) return abort();
+    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: afterCasLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
+    throw new Error("本機資料已更新，請重新確認目前資料。");
+  }
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
   try {
     await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid);
@@ -137,7 +145,6 @@ export async function resolveConflict(
     if (!ensureValid()) return abort();
     deps.setData(next);
     if (!ensureValid()) return abort();
-    deps.setPending(undefined);
     throw error;
   }
   if (!ensureValid()) return abort();
@@ -171,7 +178,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
       return;
     }
     if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
-    else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourceGame as unknown as Record<string, unknown>)[item.field]);
+    else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
   }
   if (!game || !sourceGame) return;
@@ -192,5 +199,9 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
     point.issueTags = (Array.isArray(point.issueTags) ? point.issueTags : []).filter((candidate) => candidate !== tag);
     if (Array.isArray(sourcePoint.issueTags) && sourcePoint.issueTags.includes(tag)) point.issueTags.push(tag);
     point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
-  } else (point as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourcePoint as unknown as Record<string, unknown>)[item.field]);
+  } else (point as unknown as Record<string, unknown>)[item.field] = cloneValue((sourcePoint as unknown as Record<string, unknown>)[item.field]);
+}
+
+function cloneValue(value: unknown): unknown {
+  return value === undefined ? undefined : globalThis.structuredClone(value);
 }
