@@ -2,8 +2,8 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, PERSPECTIVES, REASONS, type AppData, type Game, type IssueTag, type Perspective, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryProfileRepository, type ProfileKey, type ProfileRepository } from "./repository.js";
-import { mergeAppData, type MergeConflict } from "./merge.js";
-import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, startGoogleLogin, supabase, SupabaseSyncRepository, type PendingConflict, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import "./style.css";
@@ -23,8 +23,13 @@ let renderedRoute = "";
 let syncStatus: SyncStatus = "僅本機";
 let syncMessage = "";
 let syncMetadata: SyncMetadata = { hashVersion: 1 };
-let pendingConflict: { userId: string; rowRevision: number; localHash: string; baseData?: AppData; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] } | undefined;
+let localDataVersion = 0;
+let pendingConflict: PendingConflict | undefined;
 let dialogBusy = false;
+let conflictResolutionRunning = false;
+let conflictResolutionAbort: AbortController | undefined;
+let removingLocalAccount = false;
+let localAccountRemovalToken: object | undefined;
 let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
 let pendingGuestImport: { uid: string; guest: AppData } | undefined;
@@ -58,7 +63,7 @@ const autosync = new AutoSyncEngine({
     if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) data = globalThis.structuredClone(next);
   },
   getMetadata: (userId) => readMetadata(userId),
-  setMetadata: (userId, metadata) => { syncMetadata = metadata; writeMetadata(userId, metadata); },
+  setMetadata: (userId, metadata) => { syncMetadata = metadata; return Promise.resolve(writeMetadata(userId, metadata)); },
   loadBase: (userId) => repo.loadSyncBase(`user:${userId}`),
   saveBase: (userId, base) => repo.saveSyncBase(`user:${userId}`, base),
   cloud: new SupabaseSyncRepository(),
@@ -260,8 +265,12 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
   } catch (error) {
     dialogBusy = false;
     if (submit) submit.disabled = false;
+    if (kind === "conflict") {
+      closeDialog();
+      render();
+      if (pendingConflict) openDestructive("conflict");
+    } 
     showError(error);
-    if (kind === "conflict" && pendingConflict) { closeDialog(); render(); }
   }
 }
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
@@ -272,91 +281,114 @@ async function savePoint(event: Event, game: Game): Promise<void> { const form =
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 async function deletePoint(id?: string): Promise<void> { const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { game.reviewPoints = previous; throw error; } }
 async function deleteGame(id?: string): Promise<void> { const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { data.games = previous; throw error; } location.hash = "#/games"; }
-async function persist(): Promise<void> { await repo.saveProfile(activeProfile, data); if (activeUser && !profileLoadFailed && !pendingConflict) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
+async function persist(): Promise<void> { localDataVersion += 1; await repo.saveProfile(activeProfile, data); if (pendingConflict) autosync.invalidate(); else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
 async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
 function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.body.classList.add("dialog-lock"); const cancel = document.querySelector<HTMLElement>("[data-dialog] [data-dialog-cancel]"); if (cancel) cancel.focus(); }
 async function startGoogleLoginFromUi(): Promise<void> { try { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } } catch (error) { syncMessage = error instanceof Error ? error.message : "Google 登入啟動失敗，請重試。"; render(); } }
-async function removeLocalAccount(): Promise<void> { if (!activeUser) return; if (syncStatus === "同步中") throw new Error("同步完成前不能移除此裝置資料。"); const uid = activeUser.id; profileGeneration += 1; autosync.invalidate(); const { error } = await supabase.auth.signOut(); if (error) throw new Error(`登出失敗：${error.message}`); await repo.deleteProfile(`user:${uid}`); await repo.deleteSyncBase(`user:${uid}`); activeUser = null; activeProfile = "guest"; await activateProfile("guest"); updateSyncStatus("僅本機"); }
-async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; await activateProfile(`user:${pending.uid}`); closeDialog(); render(); void autosync.reconcile(); }
-async function syncNow(): Promise<void> { if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; } await autosync.reconcile(); }
-async function resolveConflict(choices: Record<string, "cloud" | "local">): Promise<void> {
-  if (!pendingConflict || !activeUser) return;
-  const conflict = pendingConflict;
-  const latest = await new SupabaseSyncRepository().read(conflict.userId);
-  if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
-  if (latest.revision !== conflict.rowRevision) {
-    const parsed = validateCloudPayload(latest.payload);
-    const refreshed = conflict.baseData
-      ? mergeAppData(conflict.baseData, data, parsed)
-      : { data, conflicts: conflict.conflicts };
-    pendingConflict = {
-      ...conflict,
-      rowRevision: latest.revision,
-      localHash: await payloadHash(data),
-      cloudData: parsed,
-      mergedData: refreshed.data,
-      conflicts: refreshed.conflicts,
-    };
-    throw new Error("雲端已更新，請重新確認目前資料。");
+async function removeLocalAccount(): Promise<void> {
+  if (!activeUser) return;
+  if (syncStatus === "同步中") throw new Error("同步完成前不能移除此裝置資料。");
+  const uid = activeUser.id;
+  const previousUser = activeUser;
+  const previousProfile = activeProfile;
+  const previousPending = pendingConflict;
+  const previousGeneration = profileGeneration;
+  const removalToken = {};
+  conflictResolutionAbort?.abort();
+  removingLocalAccount = true;
+  localAccountRemovalToken = removalToken;
+  profileGeneration += 1;
+  autosync.invalidate();
+  const { error } = await supabase.auth.signOut();
+  if (error) {
+    removingLocalAccount = false;
+    localAccountRemovalToken = undefined;
+    activeUser = previousUser;
+    activeProfile = previousProfile;
+    pendingConflict = previousPending;
+    profileGeneration = previousGeneration;
+    throw new Error(`登出失敗：${error.message}`);
   }
-  if (await payloadHash(data) !== conflict.localHash) {
-    const refreshed = conflict.baseData
-      ? mergeAppData(conflict.baseData, data, conflict.cloudData)
-      : { data, conflicts: conflict.conflicts };
-    pendingConflict = { ...conflict, localHash: await payloadHash(data), mergedData: refreshed.data, conflicts: refreshed.conflicts };
-    throw new Error("本機資料已更新，請重新確認目前資料。");
+  try {
+    if (localAccountRemovalToken !== removalToken) return;
+    await repo.deleteSyncBase(`user:${uid}`);
+    if (localAccountRemovalToken !== removalToken) return;
+    await repo.deleteProfile(`user:${uid}`);
+    if (localAccountRemovalToken !== removalToken) return;
+    activeUser = null;
+    activeProfile = "guest";
+    pendingConflict = undefined;
+    await activateProfile("guest");
+    updateSyncStatus("僅本機");
+    render();
+  } catch (error) {
+    if (localAccountRemovalToken !== removalToken) throw error;
+    activeUser = null;
+    activeProfile = "guest";
+    pendingConflict = undefined;
+    await repo.deleteProfile(`user:${uid}`);
+    await repo.deleteSyncBase(`user:${uid}`);
+    const guest = await repo.loadProfile("guest");
+    data = guest.data;
+    syncMetadata = { hashVersion: 1 };
+    profileLoadFailed = false;
+    updateSyncStatus("僅本機");
+    render();
+    throw error;
+  } finally {
+    if (localAccountRemovalToken === removalToken) {
+      removingLocalAccount = false;
+      localAccountRemovalToken = undefined;
+    }
   }
-  const next = globalThis.structuredClone(conflict.mergedData);
-  for (const [index, selected] of Object.entries(choices)) {
-    const item = conflict.conflicts[Number(index)];
-    if (item) applyConflictChoice(next, data, conflict.cloudData, item, selected);
-  }
-  const nextHash = await payloadHash(next);
-  const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, latest.revision, createBackup(next));
-  await repo.saveProfile(activeProfile, next);
-  data = next;
-  await repo.saveSyncBase(activeProfile, { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 });
-  syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
-  pendingConflict = undefined; updateSyncStatus("已同步");
 }
-function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, item: MergeConflict, selected: "local" | "cloud"): void {
-  const source = selected === "local" ? local : cloud;
-  if (item.entityId === "*") { target.games = globalThis.structuredClone(source.games); return; }
-  const gameId = item.entity === "review" ? item.entityId.slice(0, item.entityId.lastIndexOf(":")) : item.entityId;
-  const game = target.games.find((candidate) => candidate.id === gameId);
-  const sourceGame = source.games.find((candidate) => candidate.id === item.entityId || item.entityId.startsWith(`${candidate.id}:`));
-  if (item.entity === "game") {
-    if (!sourceGame) {
-      target.games = target.games.filter((candidate) => candidate.id !== gameId);
-      return;
-    }
-    if (!game) {
-      target.games.push(globalThis.structuredClone(sourceGame));
-      return;
-    }
-    if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
-    else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourceGame as unknown as Record<string, unknown>)[item.field]);
-    return;
+async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; await activateProfile(`user:${pending.uid}`); closeDialog(); render(); void autosync.reconcile(); }
+function conflictBelongsToCurrentProfile(): boolean {
+  return !pendingConflict || Boolean(activeUser
+    && pendingConflict.userId === activeUser.id
+    && pendingConflict.profile === activeProfile
+    && pendingConflict.generation === profileGeneration);
+}
+async function syncNow(): Promise<void> {
+  if (pendingConflict && !conflictBelongsToCurrentProfile()) pendingConflict = undefined;
+  if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; }
+  await autosync.reconcile();
+}
+async function resolveConflict(choices: Record<string, "cloud" | "local">): Promise<void> {
+  if (conflictResolutionRunning) throw new Error("衝突處理正在進行中。");
+  conflictResolutionRunning = true;
+  const abortController = new AbortController();
+  const capturedPending = pendingConflict;
+  conflictResolutionAbort = abortController;
+  try {
+    const result = await resolveConflictSafely(choices, {
+      identity: () => activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+      pending: () => pendingConflict,
+      setPending: (next) => { pendingConflict = next; },
+      data: () => data,
+      setData: (next) => {
+        const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        if (current && capturedPending && current.uid === capturedPending.userId && current.profile === capturedPending.profile && current.generation === capturedPending.generation) data = globalThis.structuredClone(next);
+      },
+        repository: { saveProfileAndBase: repo.saveProfileAndBase!.bind(repo) },
+      cloud: new SupabaseSyncRepository(),
+      metadata: async (uid, value) => {
+        const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        if (pendingConflict !== capturedPending || current?.uid !== uid || pendingConflict?.profile !== current.profile || pendingConflict.generation !== current.generation) throw new Error("同步身分已變更。");
+        await writeMetadata(uid, value);
+        const after = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        if (pendingConflict !== capturedPending || after?.uid !== uid || pendingConflict?.profile !== after.profile || pendingConflict.generation !== after.generation) throw new Error("同步身分已變更。");
+        syncMetadata = value;
+      },
+      onResolved: () => updateSyncStatus("已同步"),
+      signal: abortController.signal,
+      localVersion: () => localDataVersion,
+    });
+    if (result === "aborted") return;
+  } finally {
+    if (conflictResolutionAbort === abortController) conflictResolutionAbort = undefined;
+    conflictResolutionRunning = false;
   }
-  if (!game || !sourceGame) return;
-  const ply = Number(item.entityId.split(":").at(-1));
-  const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
-  const sourcePoint = sourceGame.reviewPoints.find((candidate) => candidate.ply === ply);
-  if (!sourcePoint) {
-    game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
-    return;
-  }
-  if (!point) {
-    game.reviewPoints.push(globalThis.structuredClone(sourcePoint));
-    return;
-  }
-  if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourcePoint));
-  else if (item.field.startsWith("issueTags.")) {
-    const tag = item.field.slice("issueTags.".length) as IssueTag;
-    point.issueTags = point.issueTags.filter((candidate) => candidate !== tag);
-    if (sourcePoint.issueTags.includes(tag)) point.issueTags.push(tag);
-    point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
-  } else (point as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourcePoint as unknown as Record<string, unknown>)[item.field]);
 }
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
 async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (isCurrent() && guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
@@ -366,4 +398,4 @@ function filterLibrary(): void { const root = document.querySelector("#library")
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
 async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
 void bootstrap();
-supabase.auth.onAuthStateChange((_event, session) => { const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
+supabase.auth.onAuthStateChange((_event, session) => { if (removingLocalAccount && !session?.user) return; if (removingLocalAccount && session?.user) { removingLocalAccount = false; localAccountRemovalToken = undefined; } const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; conflictResolutionAbort?.abort(); pendingConflict = undefined; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });

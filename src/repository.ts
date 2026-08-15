@@ -16,6 +16,7 @@ export interface ProfileRepository {
   deleteProfile(profile: ProfileKey): Promise<void>;
   loadSyncBase(profile: ProfileKey): Promise<SyncBaseRecord | null>;
   saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void>;
+  saveProfileAndBase?(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void>;
   deleteSyncBase(profile: ProfileKey): Promise<void>;
 }
 const empty: AppData = { games: [] };
@@ -49,6 +50,11 @@ export class MemoryProfileRepository implements ProfileRepository {
     return base ? globalThis.structuredClone(base) : null;
   }
   async saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void> { this.bases.set(profile, globalThis.structuredClone(base)); }
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal?: AbortSignal): Promise<void> {
+    if (!canCommit() || signal?.aborted) throw new Error("同步身分已變更。");
+    this.profiles.set(profile, globalThis.structuredClone(data));
+    this.bases.set(profile, globalThis.structuredClone(base));
+  }
   async deleteSyncBase(profile: ProfileKey): Promise<void> { this.bases.delete(profile); }
 }
 
@@ -155,6 +161,34 @@ export class IndexedDbRepository implements Repository {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("儲存同步基準失敗。"));
       transaction.onabort = () => reject(transaction.error ?? new Error("同步基準交易已取消。"));
+    });
+  }
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void> {
+    const db = await this.dbPromise;
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
+      let settled = false;
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        try { transaction.abort(); } catch (error) {
+          if (!(error instanceof DOMException && error.name === "InvalidStateError")) { reject(error); return; }
+        }
+        reject(new Error("同步身分已變更。"));
+      };
+      if (!canCommit() || signal?.aborted) { abort(); return; }
+      signal?.addEventListener("abort", abort, { once: true });
+      transaction.objectStore("profiles").put(createBackup(data), profile);
+      transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
+      transaction.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        resolve();
+      };
+      transaction.onerror = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };
+      transaction.onabort = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料交易已取消。")); };
     });
   }
   async deleteSyncBase(profile: ProfileKey): Promise<void> {
