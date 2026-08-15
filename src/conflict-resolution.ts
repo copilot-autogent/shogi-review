@@ -133,7 +133,7 @@ export async function resolveConflict(
       ? mergeAppData(conflict.baseData, latestLocal, next)
       : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: next, reason: "membership" as const })) };
     if (!ensureValid()) return abort();
-    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: afterCasLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
+    deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: afterCasLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
