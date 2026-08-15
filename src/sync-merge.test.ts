@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseGame } from "./parser.js";
 import { MemoryProfileRepository } from "./repository.js";
-import { AutoSyncEngine, type CloudState, type SyncRepository, type SyncSnapshot } from "./sync.js";
+import { AutoSyncEngine, payloadHash, type CloudState, type SyncRepository, type SyncSnapshot } from "./sync.js";
 
 const source = `手合割：平手
 先手：A
@@ -72,6 +72,7 @@ describe("sync base durability and CAS fixpoint", () => {
     const aData = (await repoA.loadProfile("user:u")).data;
     const bData = (await repoB.loadProfile("user:u")).data;
     expect(aData).toEqual(bData);
+    expect(await payloadHash(aData)).toBe(await payloadHash(bData));
     expect(aData.games.flatMap((game) => game.reviewPoints).map((point) => point.id)).toEqual(["p"]);
   });
   it("stores validated full ancestor payload in the profile base, separate from browser metadata", async () => {

@@ -68,6 +68,22 @@ describe("deterministic three-way merge decision table", () => {
     expect(result.conflicts).toHaveLength(0);
     expect(result.data.games[0]!.sourceText).toBe(ancestor.sourceText);
   });
+  it("merges same-ply concurrent additions with deterministic UUID and timestamp", () => {
+    const ancestor = data();
+    const value = game("a");
+    const left = data({ ...value, reviewPoints: [{ ...point(value, "z"), createdAt: "2026-01-02T00:00:00.000Z" }] });
+    const right = data({ ...value, reviewPoints: [{ ...point(value, "a"), createdAt: "2026-01-01T00:00:00.000Z" }] });
+    const result = mergeAppData(ancestor, left, right);
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.data.games[0]!.reviewPoints[0]).toMatchObject({ id: "a", createdAt: "2026-01-01T00:00:00.000Z" });
+  });
+  it("propagates deletion when the other side is unchanged", () => {
+    const value = game("a");
+    const reviewed = { ...value, reviewPoints: [point(value, "p")] };
+    const result = mergeAppData(data(reviewed), data({ ...reviewed, reviewPoints: [] }), data(reviewed));
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.data.games[0]!.reviewPoints).toHaveLength(0);
+  });
   it("rejects duplicate review plies instead of silently collapsing them", () => {
     const value = game("a");
     value.reviewPoints = [point(value, "one"), point(value, "two")];

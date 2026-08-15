@@ -120,7 +120,7 @@ function coreGame(base: Game | undefined, local: Game, cloud: Game, conflicts: M
 }
 function mergeReviews(base: ReviewPoint | undefined, local: ReviewPoint, cloud: ReviewPoint, conflicts: MergeConflict[]): ReviewPoint {
   const identity = base?.id ?? [local.id, cloud.id].sort()[0]!;
-  if (local.sfen !== cloud.sfen || local.createdAt !== cloud.createdAt) {
+  if (local.sfen !== cloud.sfen || (base !== undefined && local.createdAt !== cloud.createdAt)) {
     conflict(conflicts, "review", identity, "anchor", base && { sfen: base.sfen, createdAt: base.createdAt }, local, cloud, "identity");
   }
   const result = normalizePoint(base ?? (stable(local) <= stable(cloud) ? local : cloud));

@@ -57,8 +57,8 @@ const autosync = new AutoSyncEngine({
     await repo.saveProfile(profile, next);
     if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) data = globalThis.structuredClone(next);
   },
-  getMetadata: () => syncMetadata,
-  setMetadata: (_userId, metadata) => { syncMetadata = metadata; },
+  getMetadata: (userId) => readMetadata(userId),
+  setMetadata: (userId, metadata) => { syncMetadata = metadata; writeMetadata(userId, metadata); },
   loadBase: (userId) => repo.loadSyncBase(`user:${userId}`),
   saveBase: (userId, base) => repo.saveSyncBase(`user:${userId}`, base),
   cloud: new SupabaseSyncRepository(),
@@ -75,6 +75,17 @@ function updateSyncStatus(status: SyncStatus, message = ""): void {
   if (retry) retry.hidden = !activeUser || (status !== "離線／同步失敗" && status !== "衝突");
   const conflict = document.querySelector<HTMLElement>("[data-conflict-action]");
   if (conflict) conflict.hidden = !pendingConflict;
+}
+function readMetadata(userId: string): SyncMetadata {
+  try {
+    const value = window.localStorage.getItem(`shogi-review-sync:${userId}`);
+    return value ? JSON.parse(value) as SyncMetadata : { hashVersion: 1 };
+  } catch {
+    return { hashVersion: 1 };
+  }
+}
+function writeMetadata(userId: string, value: SyncMetadata): void {
+  window.localStorage.setItem(`shogi-review-sync:${userId}`, JSON.stringify(value));
 }
 function pieceName(char: string, promoted: boolean): string {
   const base: Record<string, string> = { P: "歩", L: "香", N: "桂", S: "銀", G: "金", B: "角", R: "飛", K: "玉" };
@@ -279,9 +290,9 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
     if (item) applyConflictChoice(next, data, conflict.cloudData, item, selected);
   }
   const nextHash = await payloadHash(next);
+  const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, latest.revision, createBackup(next));
   await repo.saveProfile(activeProfile, next);
   data = next;
-  const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, latest.revision, createBackup(next));
   await repo.saveSyncBase(activeProfile, { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 });
   syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
   pendingConflict = undefined; updateSyncStatus("已同步");
@@ -289,16 +300,34 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
 function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, item: MergeConflict, selected: "local" | "cloud"): void {
   const source = selected === "local" ? local : cloud;
   if (item.entityId === "*") { target.games = globalThis.structuredClone(source.games); return; }
-  const game = target.games.find((candidate) => candidate.id === item.entityId || item.entityId.startsWith(`${candidate.id}:`));
+  const gameId = item.entity === "review" ? item.entityId.slice(0, item.entityId.lastIndexOf(":")) : item.entityId;
+  const game = target.games.find((candidate) => candidate.id === gameId);
   const sourceGame = source.games.find((candidate) => candidate.id === item.entityId || item.entityId.startsWith(`${candidate.id}:`));
-  if (!game || !sourceGame) return;
   if (item.entity === "game") {
+    if (!sourceGame) {
+      target.games = target.games.filter((candidate) => candidate.id !== gameId);
+      return;
+    }
+    if (!game) {
+      target.games.push(globalThis.structuredClone(sourceGame));
+      return;
+    }
     if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
     else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
   }
-  const ply = Number(item.entityId.split(":").at(-1)); const point = game.reviewPoints.find((candidate) => candidate.ply === ply); const sourcePoint = sourceGame.reviewPoints.find((candidate) => candidate.ply === ply);
-  if (!point || !sourcePoint) return;
+  if (!game || !sourceGame) return;
+  const ply = Number(item.entityId.split(":").at(-1));
+  const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
+  const sourcePoint = sourceGame.reviewPoints.find((candidate) => candidate.ply === ply);
+  if (!sourcePoint) {
+    game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
+    return;
+  }
+  if (!point) {
+    game.reviewPoints.push(globalThis.structuredClone(sourcePoint));
+    return;
+  }
   if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourcePoint));
   else if (item.field.startsWith("issueTags.")) {
     const tag = item.field.slice("issueTags.".length) as IssueTag;
@@ -310,7 +339,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
 async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (isCurrent() && guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
 function openGuestImportDialog(_uid: string, _guest: AppData, _cloud: AppData): void { openDestructive("guest-import"); }
-async function activateProfile(profile: ProfileKey): Promise<void> { profileGeneration += 1; autosync.invalidate(); pendingConflict = undefined; const loaded = await repo.loadProfile(profile); data = loaded.data; activeProfile = profile; profileLoadFailed = false; if (loaded.migrated) await repo.saveProfile("guest", data); }
+async function activateProfile(profile: ProfileKey): Promise<void> { profileGeneration += 1; autosync.invalidate(); pendingConflict = undefined; const loaded = await repo.loadProfile(profile); data = loaded.data; activeProfile = profile; syncMetadata = profile.startsWith("user:") ? readMetadata(profile.slice("user:".length)) : { hashVersion: 1 }; profileLoadFailed = false; if (loaded.migrated) await repo.saveProfile("guest", data); }
 function filterLibrary(): void { const root = document.querySelector("#library"); if (!root) return; const game = (root.querySelector('[name="game"]') as HTMLSelectElement).value; const reason = (root.querySelector('[name="reason"]') as HTMLSelectElement).value; const tags = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="issueTags"]:checked')).map((input) => input.value); root.querySelectorAll<HTMLElement>(".library-item").forEach((item) => { item.style.display = (!game || item.dataset.game === game) && (!reason || item.dataset.reason === reason) && (!tags.length || tags.some((tag) => (item.dataset.tags ?? "").split("|").includes(tag))) ? "" : "none"; }); }
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
 async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
