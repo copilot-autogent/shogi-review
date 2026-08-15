@@ -351,6 +351,7 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
   if (conflictResolutionRunning) throw new Error("衝突處理正在進行中。");
   conflictResolutionRunning = true;
   const abortController = new AbortController();
+  const capturedPending = pendingConflict;
   conflictResolutionAbort = abortController;
   try {
     const result = await resolveConflictSafely(choices, {
@@ -363,10 +364,10 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
       cloud: new SupabaseSyncRepository(),
       metadata: async (uid, value) => {
         const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
-        if (current?.uid !== uid || pendingConflict?.profile !== current.profile || pendingConflict.generation !== current.generation) throw new Error("同步身分已變更。");
+        if (pendingConflict !== capturedPending || current?.uid !== uid || pendingConflict?.profile !== current.profile || pendingConflict.generation !== current.generation) throw new Error("同步身分已變更。");
         await writeMetadata(uid, value);
         const after = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
-        if (after?.uid !== uid || pendingConflict?.profile !== after.profile || pendingConflict.generation !== after.generation) throw new Error("同步身分已變更。");
+        if (pendingConflict !== capturedPending || after?.uid !== uid || pendingConflict?.profile !== after.profile || pendingConflict.generation !== after.generation) throw new Error("同步身分已變更。");
         syncMetadata = value;
       },
       onResolved: () => updateSyncStatus("已同步"),
