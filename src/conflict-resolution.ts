@@ -231,7 +231,10 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
     point.issueTags = (Array.isArray(point.issueTags) ? point.issueTags : []).filter((candidate) => candidate !== tag);
     if (Array.isArray(sourceReviewPoint.issueTags) && sourceReviewPoint.issueTags.includes(tag)) point.issueTags.push(tag);
     point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
-  } else (point as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceReviewPoint as unknown as Record<string, unknown>)[item.field]);
+  } else {
+    const sourceValue = (sourceReviewPoint as unknown as Record<string, unknown>)[item.field];
+    (point as unknown as Record<string, unknown>)[item.field] = cloneValue(sourceValue);
+  }
 }
 
 function cloneValue(value: unknown): unknown {
