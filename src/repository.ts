@@ -16,7 +16,7 @@ export interface ProfileRepository {
   deleteProfile(profile: ProfileKey): Promise<void>;
   loadSyncBase(profile: ProfileKey): Promise<SyncBaseRecord | null>;
   saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void>;
-  saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord): Promise<void>;
+  saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit?: () => boolean): Promise<void>;
   deleteSyncBase(profile: ProfileKey): Promise<void>;
 }
 const empty: AppData = { games: [] };
@@ -50,7 +50,8 @@ export class MemoryProfileRepository implements ProfileRepository {
     return base ? globalThis.structuredClone(base) : null;
   }
   async saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void> { this.bases.set(profile, globalThis.structuredClone(base)); }
-  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord): Promise<void> {
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit = () => true): Promise<void> {
+    if (!canCommit()) throw new Error("同步身分已變更。");
     this.profiles.set(profile, globalThis.structuredClone(data));
     this.bases.set(profile, globalThis.structuredClone(base));
   }
@@ -162,10 +163,11 @@ export class IndexedDbRepository implements Repository {
       transaction.onabort = () => reject(transaction.error ?? new Error("同步基準交易已取消。"));
     });
   }
-  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord): Promise<void> {
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit = () => true): Promise<void> {
     const db = await this.dbPromise;
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
+      if (!canCommit()) { transaction.abort(); reject(new Error("同步身分已變更。")); return; }
       transaction.objectStore("profiles").put(createBackup(data), profile);
       transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
       transaction.oncomplete = () => resolve();

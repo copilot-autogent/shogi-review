@@ -48,7 +48,13 @@ export async function resolveConflict(
     return "aborted";
   };
   const readLocal = (): AppData => globalThis.structuredClone(deps.data());
-  const latest = await deps.cloud.read(identity.uid);
+  let latest: Awaited<ReturnType<SyncRepository["read"]>>;
+  try {
+    latest = await deps.cloud.read(identity.uid);
+  } catch (error) {
+    if (!ensureValid()) return abort();
+    throw error;
+  }
   if (!ensureValid()) return abort();
   if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
   const local = readLocal();
@@ -111,7 +117,12 @@ export async function resolveConflict(
   if (!ensureValid()) return abort();
   if (afterCasLocalHash !== localHash) return abort();
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
-  await deps.repository.saveProfileAndBase(identity.profile, next, base);
+  try {
+    await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid);
+  } catch (error) {
+    if (!ensureValid()) return abort();
+    throw error;
+  }
   if (!ensureValid()) return abort();
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
   await deps.metadata(identity.uid, metadata);
