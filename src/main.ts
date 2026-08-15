@@ -7,6 +7,7 @@ import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import { AuthTransitionGate, drainLatestAuthTransitions, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
+import { buildReviewViewModel, parseReviewRoute, renderReviewPage, reviewEntries, reviewRoute, type ReviewEntry, type ReviewState } from "./review-page.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -26,7 +27,6 @@ let activeAuthSession: Session | null | undefined;
 let profileLoadFailed = false;
 let selectedGame: Game | undefined;
 let selectedPly = 0;
-let rethinkMode = false;
 let startupError = "";
 let renderedRoute = "";
 let syncStatus: SyncStatus = "僅本機";
@@ -42,6 +42,9 @@ let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
 let pendingGuestImport: { uid: string; guest: AppData } | undefined;
 let temporaryFlip: { gameId: string; flipped: boolean } | undefined;
+let reviewNavigation: ReviewEntry[] | undefined;
+let reviewState: ReviewState = { revealed: false, continuationOpen: false, displayedPly: 0, continuationPly: 0 };
+let reviewIdentity = "";
 let importDraft = { title: "", format: "KIF" as InputFormat, source: "", perspective: "spectator" as Perspective };
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
@@ -126,9 +129,9 @@ function board(sfen: string, orientation: BoardOrientation): string {
     const rotated = pieceRotated(cell.piece, orientation);
     return `<span class="square piece ${owner}${rotated ? " rotated" : ""}${cell.promoted ? " promoted" : ""}">${pieceName(cell.piece, Boolean(cell.promoted))}</span>`;
   }).join("");
-  const status = orientation === "normal" ? "先手在下" : "後手在下";
   const hand = (owner: "gote" | "sente") => `<div class="hand ${owner}" aria-label="${owner === "gote" ? "後手持駒" : "先手持駒"}" role="region" tabindex="0"><span class="hand-label">${owner === "gote" ? "後手持駒" : "先手持駒"}</span>${hands(sfen, owner, orientation)}</div>`;
-  return `<div class="position" data-orientation="${orientation}"><div class="orientation-toolbar"><span role="status" aria-live="polite">${status}</span><button type="button" class="secondary" data-flip aria-pressed="${orientation === "flipped"}">翻轉棋盤</button></div>${hand(view.topHandOwner)}<div class="board" aria-label="將棋盤">${cells}</div>${hand(view.bottomHandOwner)}</div>`;
+  const turn = (sfen.split(" ")[1] ?? "b") === "w" ? "輪到後手" : "輪到先手";
+  return `<div class="position" data-orientation="${orientation}"><div class="orientation-toolbar"><span role="status" aria-live="polite">${turn}</span><button type="button" class="secondary" data-flip aria-label="翻轉棋盤" aria-pressed="${orientation === "flipped"}">翻轉棋盤</button></div>${hand(view.topHandOwner)}<div class="board" aria-label="將棋盤">${cells}</div>${hand(view.bottomHandOwner)}</div>`;
 }
 function optionList(values: readonly string[], selected: string): string { return values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(value)}</option>`).join(""); }
 function perspectiveOptions(selected: Perspective): string {
@@ -145,8 +148,8 @@ function updateImportDraft(): void {
   };
 }
 function tagChecks(selected: IssueTag[]): string { return ISSUE_TAGS.map((tag) => `<label class="check"><input type="checkbox" name="issueTags" value="${esc(tag)}" ${selected.includes(tag) ? "checked" : ""}>${esc(tag)}</label>`).join(""); }
-function gameHash(gameId: string, ply: number, rethink = false): string { return `#/game/${encodeURIComponent(gameId)}?ply=${ply}${rethink ? "&rethink=1" : ""}`; }
-function setPly(ply: number): void { if (selectedGame) location.hash = gameHash(selectedGame.id, Math.max(0, Math.min(ply, selectedGame.moves.length)), rethinkMode); }
+function gameHash(gameId: string, ply: number): string { return `#/game/${encodeURIComponent(gameId)}?ply=${ply}`; }
+function setPly(ply: number): void { if (selectedGame) location.hash = gameHash(selectedGame.id, Math.max(0, Math.min(ply, selectedGame.moves.length))); }
 function resetScroll(): void { if (typeof window.scrollTo === "function") window.scrollTo({ top: 0, left: 0, behavior: "auto" }); }
 function header(): string {
   const account = activeUser
@@ -162,11 +165,18 @@ function render(): void {
     return;
   }
   const route = location.hash || "#/";
+  const reviewRouteValue = parseReviewRoute(route);
+  if (reviewRouteValue) {
+    if (renderedRoute !== route) resetScroll();
+    renderedRoute = route;
+    renderReview(reviewRouteValue);
+    return;
+  }
   if (route.startsWith("#/game/")) {
     const [rawId, query = ""] = route.slice(7).split("?"); let id = "";
     try { id = decodeURIComponent(rawId ?? ""); } catch { location.hash = "#/"; return; }
     const params = new URLSearchParams(query); const requestedPly = Number(params.get("ply"));
-    selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; rethinkMode = params.get("rethink") === "1"; selectedGame = data.games.find((game) => game.id === id);
+    selectedPly = Number.isInteger(requestedPly) && requestedPly >= 0 ? requestedPly : 0; selectedGame = data.games.find((game) => game.id === id);
     if (!selectedGame) { location.hash = "#/"; return; }
     const sameGameRoute = renderedRoute.startsWith("#/game/") && renderedRoute.slice(7).split("?")[0] === rawId;
     if (!sameGameRoute || temporaryFlip?.gameId !== selectedGame.id) temporaryFlip = { gameId: selectedGame.id, flipped: defaultOrientation(selectedGame) === "flipped" };
@@ -192,16 +202,69 @@ function renderGames(): void {
 }
 function renderLibrary(): string {
   const points = data.games.flatMap((game) => game.reviewPoints.map((point) => ({ game, point })));
-  return `<div id="library"><div class="filters"><label>棋局<select name="game"><option value="">全部</option>${data.games.map((game) => `<option value="${esc(game.id)}">${esc(game.title)}</option>`).join("")}</select></label><label>原因<select name="reason"><option value="">全部</option>${optionList(REASONS, "")}</select></label><fieldset><legend>問題標籤</legend>${tagChecks([])}</fieldset></div><div id="library-list">${points.length ? points.map(({ game, point }) => `<article class="library-item" data-game="${esc(game.id)}" data-reason="${esc(point.reason)}" data-tags="${esc(point.issueTags.join("|"))}"><h3>${esc(game.title)} · 第 ${point.ply} 手</h3><p>${esc(point.reason)}${point.issueTags.length ? ` · ${point.issueTags.map(esc).join("、")}` : ""}</p><div class="actions"><button data-open="${esc(game.id)}" data-ply="${point.ply}">開啟局面</button><button data-rethink="${esc(game.id)}" data-ply="${point.ply}">重新思考</button><button class="secondary" data-edit="${esc(point.id)}">編輯</button><button class="danger" data-delete="${esc(point.id)}">刪除</button></div></article>`).join("") : "<p class='muted'>儲存第一個複盤局面後，它會出現在這裡。</p>"}</div></div>`;
+  return `<div id="library"><div class="filters"><label>棋局<select name="game"><option value="">全部</option>${data.games.map((game) => `<option value="${esc(game.id)}">${esc(game.title)}</option>`).join("")}</select></label><label>原因<select name="reason"><option value="">全部</option>${optionList(REASONS, "")}</select></label><fieldset><legend>問題標籤</legend>${tagChecks([])}</fieldset></div><div id="library-list">${points.length ? points.map(({ game, point }) => `<article class="library-item" data-game="${esc(game.id)}" data-point="${esc(point.id)}" data-reason="${esc(point.reason)}" data-tags="${esc(point.issueTags.join("|"))}"><h3>${esc(game.title)} · 第 ${point.ply} 手後</h3><p class="muted">已儲存複盤局面</p><div class="actions"><button data-review="${esc(game.id)}" data-point="${esc(point.id)}">開始複盤</button><details class="compact-actions"><summary>更多操作</summary><div class="actions"><button class="secondary" data-open="${esc(game.id)}" data-ply="${point.ply}">在棋局中查看</button><button class="secondary" data-edit="${esc(point.id)}">編輯</button><button class="danger" data-delete="${esc(point.id)}">刪除</button></div></details></div></article>`).join("") : "<p class='muted'>儲存第一個複盤局面後，它會出現在這裡。</p>"}</div></div>`;
 }
 function renderGame(game: Game): void {
   const sfen = game.sfens[selectedPly] ?? game.initialSfen; const point = game.reviewPoints.find((item) => item.ply === selectedPly);
   const orientation = currentOrientation(game);
-  const rethink = rethinkMode && point ? `<section class="rethink panel"><h2>重新思考</h2>${board(point.sfen, orientation)}<p>如果再遇到這個局面，你會先注意什麼？</p><button id="reveal">揭示記錄</button><div id="reveal-content" hidden><p><strong>原因：</strong>${esc(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(esc).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次注意：</strong>${esc(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${esc(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${esc(point.legacyNotes)}</p></details>` : ""}</div></section>` : "";
-  app!.innerHTML = `${header()}<main class="review-layout"><section class="panel replay"><div class="game-header"><a href="#/games">← 棋局</a><h1>${esc(game.title)}</h1><button class="secondary" data-rename="${esc(game.id)}">編輯棋局</button><button class="danger" data-game-delete="${esc(game.id)}">刪除</button></div>${board(sfen, orientation)}<p class="sfen">${esc(sfen)}</p><div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol><button class="secondary" id="download-kifu">下載原始棋譜</button></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label for="reason">為什麼標記這裡？ <strong>必填</strong></label><select id="reason" name="reason" required><option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>${optionList(REASONS, point?.reason ?? "")}</select><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label for="note">下次要注意什麼？</label><textarea id="note" name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><textarea id="external-notes" name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details><button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section>${rethink}</main>`; bindCommon();
+  app!.innerHTML = `${header()}<main class="review-layout"><section class="panel replay"><div class="game-header"><a href="#/games">← 棋局</a><h1>${esc(game.title)}</h1><button class="secondary" data-rename="${esc(game.id)}">編輯棋局</button><button class="danger" data-game-delete="${esc(game.id)}">刪除</button></div>${board(sfen, orientation)}<div class="replay-controls"><button id="prev" ${selectedPly === 0 ? "disabled" : ""}>上一手</button><strong>第 ${selectedPly} / ${game.moves.length} 手</strong><button id="next" ${selectedPly >= game.moves.length ? "disabled" : ""}>下一手</button></div><ol class="moves">${game.moves.map((move, i) => `<li class="${i + 1 === selectedPly ? "active" : ""}"><button data-ply="${i + 1}">${esc(move)}</button></li>`).join("")}</ol><button class="secondary" id="download-kifu">下載原始棋譜</button></section><section class="panel note-panel"><h2>${point ? "編輯" : "建立"}複盤局面</h2><form id="point-form"><label for="reason">為什麼標記這裡？ <strong>必填</strong></label><select id="reason" name="reason" required><option value="" disabled ${point ? "" : "selected"}>請選擇原因</option>${optionList(REASONS, point?.reason ?? "")}</select><fieldset><legend>涉及哪些問題？（可複選）</legend>${tagChecks(point?.issueTags ?? [])}</fieldset><label for="note">下次要注意什麼？</label><textarea id="note" name="note">${esc(point?.note ?? "")}</textarea><details><summary>外部分析筆記</summary><textarea id="external-notes" name="externalNotes">${esc(point?.externalNotes ?? "")}</textarea></details><button type="submit">${point ? "更新" : "儲存"}複盤局面</button></form></section><section class="panel saved-review-list"><h2>這局的複盤局面</h2>${game.reviewPoints.length ? game.reviewPoints.map((saved) => `<p><a class="button-link" href="${reviewRoute(game.id, saved.id)}">第 ${saved.ply} 手後 · 開始複盤</a></p>`).join("") : "<p class='muted'>這局還沒有儲存的複盤局面。</p>"}</section></main>`; bindCommon();
   document.querySelector("#prev")?.addEventListener("click", () => setPly(selectedPly - 1)); document.querySelector("#next")?.addEventListener("click", () => setPly(selectedPly + 1)); document.querySelectorAll<HTMLElement>("[data-ply]").forEach((el) => el.addEventListener("click", () => setPly(Number(el.dataset.ply))));
   document.querySelectorAll<HTMLElement>("[data-flip]").forEach((el) => el.addEventListener("click", () => { temporaryFlip = { gameId: game.id, flipped: !el.getAttribute("aria-pressed") || el.getAttribute("aria-pressed") !== "true" }; renderGame(game); }));
-  document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game)); document.querySelector("#download-kifu")?.addEventListener("click", () => downloadKifu(game.sourceText, game.sourceFormat, game.title)); document.querySelector("#reveal")?.addEventListener("click", () => { const content = document.querySelector<HTMLElement>("#reveal-content"); if (content) { content.hidden = false; document.querySelector("#reveal")?.remove(); } });
+  document.querySelector("#point-form")?.addEventListener("submit", (event) => void savePoint(event, game)); document.querySelector("#download-kifu")?.addEventListener("click", () => downloadKifu(game.sourceText, game.sourceFormat, game.title));
+}
+function renderReview(route: NonNullable<ReturnType<typeof parseReviewRoute>>): void {
+  const found = route.kind === "invalid" ? undefined : reviewEntries(data).find(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
+  const identity = found ? `${found.game.id}/${found.point.id}` : location.hash;
+  if (identity !== reviewIdentity) {
+    reviewState = { revealed: false, continuationOpen: false, displayedPly: found?.point.ply ?? 0, continuationPly: found?.point.ply ?? 0 };
+    if (found && temporaryFlip?.gameId !== found.game.id) temporaryFlip = { gameId: found.game.id, flipped: defaultOrientation(found.game) === "flipped" };
+    reviewIdentity = identity;
+  }
+  const orientation = found && temporaryFlip?.gameId === found.game.id ? (temporaryFlip.flipped ? "flipped" : "normal") : found ? defaultOrientation(found.game) : "normal";
+  const vm = buildReviewViewModel(data, route, reviewState, reviewNavigation, orientation);
+  app!.innerHTML = `${header()}${renderReviewPage(vm)}`;
+  bindCommon();
+  document.querySelectorAll<HTMLElement>("[data-review-flip]").forEach((element) => element.addEventListener("click", () => {
+    if (!found) return;
+    temporaryFlip = { gameId: found.game.id, flipped: !temporaryFlip?.flipped };
+    renderReview(route);
+  }));
+  document.querySelectorAll<HTMLElement>("[data-review-history]").forEach((element) => element.addEventListener("click", () => {
+    reviewState.displayedPly = Number(element.dataset.reviewHistory ?? found?.point.ply ?? 0);
+    renderReview(route);
+  }));
+  document.querySelector("[data-review-prev-history]")?.addEventListener("click", () => {
+    if (!found) return;
+    reviewState.displayedPly = Math.max(found.point.ply - 5, Math.min(found.point.ply, reviewState.displayedPly - 1));
+    renderReview(route);
+  });
+  document.querySelector("[data-review-anchor]")?.addEventListener("click", () => {
+    if (!found) return;
+    reviewState.displayedPly = found.point.ply;
+    renderReview(route);
+  });
+  document.querySelector("[data-review-reveal]")?.addEventListener("click", () => {
+    reviewState.revealed = true;
+    renderReview(route);
+    document.querySelector<HTMLElement>("#review-answer")?.focus();
+  });
+  document.querySelector("[data-review-continuation]")?.addEventListener("click", () => {
+    reviewState.continuationOpen = true;
+    reviewState.continuationPly = (found?.point.ply ?? 0) + 1;
+    renderReview(route);
+  });
+  document.querySelector("[data-review-prev]")?.addEventListener("click", () => navigateReview(-1));
+  document.querySelector("[data-review-next]")?.addEventListener("click", () => navigateReview(1));
+}
+function navigateReview(direction: -1 | 1): void {
+  const route = parseReviewRoute(location.hash);
+  if (!route || route.kind === "invalid") return;
+  const current = reviewEntries(data).findIndex(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
+  const entries = reviewNavigation?.length ? reviewNavigation : reviewEntries(data);
+  const activeIndex = entries.findIndex(({ game, point }) => point.id === route.pointId && (route.kind === "legacy" || game.id === route.gameId));
+  const index = activeIndex >= 0 ? activeIndex : current;
+  const next = entries[index + direction];
+  if (next) location.hash = reviewRoute(next.game.id, next.point.id);
 }
 function renderSettings(): void {
   selectedGame = undefined; const count = data.games.length; app!.innerHTML = `${header()}<main><a href="#/">← 首頁</a><h1>設定</h1><div class="settings-grid"><section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>${esc(activeUser.email ?? "Google 帳號")}</strong></p><p>此裝置資料：${count} 局</p><p data-sync-status role="status" aria-live="polite">${esc(statusText())}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><button data-sync-retry ${syncStatus === "已同步" ? "hidden" : ""}>${syncStatus === "衝突" ? "處理衝突" : "立即同步"}</button><button id="logout-remove" class="danger">登出並移除此裝置的帳號資料</button>` : `<p>訪客資料只保存在此裝置。</p><button data-login>使用 Google 登入</button><button id="clear-guest" class="danger" ${count ? "" : "disabled"}>清除訪客資料</button>`}</section><section class="panel"><h2>備份與還原</h2><p>資料先保存在此裝置；登入後會安全同步至你的私人雲端。</p><div class="actions"><button id="export">下載備份</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section></div></main>`; bindCommon(); document.querySelector("#export")?.addEventListener("click", () => { generateBackup(); }); document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e)); document.querySelector("#clear-guest")?.addEventListener("click", () => openDestructive("clear-guest")); document.querySelector("#logout-remove")?.addEventListener("click", () => openDestructive("remove-profile")); document.querySelector("[data-sync-retry]")?.addEventListener("click", () => { if (pendingConflict) openDestructive("conflict"); else void syncNow(); });
@@ -211,7 +274,13 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-conflict-action]").forEach((el) => el.addEventListener("click", () => openDestructive("conflict")));
   document.querySelectorAll<HTMLElement>("[data-delete]").forEach((el) => el.addEventListener("click", () => openDestructive("delete-point", el.dataset.delete)));
   document.querySelectorAll<HTMLElement>("[data-edit]").forEach((el) => el.addEventListener("click", () => { const item = data.games.flatMap((game) => game.reviewPoints.map((point) => ({ game, point }))).find(({ point }) => point.id === el.dataset.edit); if (item) location.hash = gameHash(item.game.id, item.point.ply); }));
-  document.querySelectorAll<HTMLElement>("[data-rethink]").forEach((el) => el.addEventListener("click", () => { location.hash = gameHash(el.dataset.rethink ?? "", Number(el.dataset.ply ?? 0), true); }));
+  document.querySelectorAll<HTMLElement>("[data-review]").forEach((el) => el.addEventListener("click", () => {
+    const visible = Array.from(document.querySelectorAll<HTMLElement>(".library-item")).filter((item) => item.style.display !== "none");
+    reviewNavigation = visible.map((item) => reviewEntries(data).find(({ game, point }) => game.id === item.dataset.game && point.id === item.dataset.point)).filter((entry): entry is ReviewEntry => Boolean(entry));
+    reviewState = { revealed: false, continuationOpen: false, displayedPly: 0, continuationPly: 0 };
+    reviewIdentity = "";
+    location.hash = reviewRoute(el.dataset.review ?? "", el.dataset.point ?? "");
+  }));
   document.querySelectorAll<HTMLElement>("[data-rename]").forEach((el) => el.addEventListener("click", () => openDestructive("rename-game", el.dataset.rename)));
   document.querySelectorAll<HTMLElement>("[data-game-delete]").forEach((el) => el.addEventListener("click", () => openDestructive("delete-game", el.dataset.gameDelete)));
   updateSyncStatus(syncStatus, syncMessage);
