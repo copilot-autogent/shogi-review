@@ -204,7 +204,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
       game.reviewPoints = [
         ...sourceReviewPoints,
         ...existingReviewPoints.filter((point) => !sourceReviewPoints.some((sourcePoint) => sourcePoint.ply === point.ply)),
-      ];
+      ].sort((left, right) => left.ply - right.ply);
     }
     else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
@@ -215,7 +215,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
   const sourcePoint = (Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : []).find((candidate) => candidate.ply === ply);
   if (!sourcePoint) {
-    if (item.field === "__membership" || item.field === "anchor") game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
+    game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
     return;
   }
   if (!point) {
