@@ -362,7 +362,7 @@ function updateDialogGate(): void {
 function dialogKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape" && !dialogBusy) { closeDialog(); return; }
   if (event.key !== "Tab") return;
-  const focusable = Array.from(document.querySelectorAll<HTMLElement>("[data-dialog] button:not([disabled]), [data-dialog] input:not([disabled])")); if (!focusable.length) return;
+  const focusable = Array.from(document.querySelectorAll<HTMLElement>("[data-dialog] button:not([disabled]), [data-dialog] input:not([disabled]), [data-dialog] select:not([disabled]), [data-dialog] textarea:not([disabled]), [data-dialog] a[href]")).filter((element) => element.offsetParent !== null); if (!focusable.length) return;
   const index = focusable.indexOf(document.activeElement as HTMLElement); const next = focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length]; event.preventDefault(); next?.focus();
 }
 function closeDialog(): void { if (dialogBusy) return; document.querySelector("[data-dialog]")?.remove(); document.body.classList.remove("dialog-lock"); dialogReturnFocus?.focus(); dialogReturnFocus = null; }
@@ -405,7 +405,7 @@ async function savePoint(event: Event, game: Game): Promise<void> { assertWritab
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 async function deletePoint(id?: string): Promise<void> { assertWritable(); const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; throw error; } }
 async function deleteGame(id?: string): Promise<void> { assertWritable(); const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; } location.hash = "#/games"; }
-async function persist(): Promise<void> { assertWritable(); const identity = currentIdentity(); if (!identity) throw new Error("尚未完成帳號資料載入。"); localDataVersion += 1; await repo.saveProfile(identity.profile, data); if (!identityIsCurrent(identity)) throw new Error("帳號身分已變更，未儲存變更。"); if (pendingConflict) autosync.invalidate(); else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
+async function persist(): Promise<void> { assertWritable(); const identity = currentPersistenceIdentity(); if (!identity) throw new Error("尚未完成帳號資料載入。"); localDataVersion += 1; await repo.saveProfile(identity.profile, data); if (!identityIsCurrent(identity)) throw new Error("帳號身分已變更，未儲存變更。"); if (pendingConflict) autosync.invalidate(); else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
 async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
 function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { if (profileTransition) return; const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { if (!profileTransition) data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.body.classList.add("dialog-lock"); const cancel = document.querySelector<HTMLElement>("[data-dialog] [data-dialog-cancel]"); if (cancel) cancel.focus(); }
 async function startGoogleLoginFromUi(): Promise<void> { try { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } } catch (error) { syncMessage = error instanceof Error ? error.message : "Google 登入啟動失敗，請重試。"; render(); } }
@@ -497,11 +497,16 @@ function currentIdentity(): { uid: string; profile: ProfileKey; generation: numb
     ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration }
     : null;
 }
+function currentPersistenceIdentity(): { uid: string; profile: ProfileKey; generation: number } | null {
+  return !profileTransition && !profileLoadFailed
+    ? { uid: activeUser?.id ?? "guest", profile: activeProfile, generation: profileGeneration }
+    : null;
+}
 function assertWritable(): void {
   if (profileTransition) throw new Error("帳號資料載入中，暫時不能修改。");
 }
 function identityIsCurrent(identity: { uid: string; profile: ProfileKey; generation: number }): boolean {
-  const current = currentIdentity();
+  const current = currentPersistenceIdentity();
   return Boolean(current && current.uid === identity.uid && current.profile === identity.profile && current.generation === identity.generation);
 }
 async function copyGuestData(): Promise<void> {
