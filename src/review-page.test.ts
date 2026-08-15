@@ -46,6 +46,8 @@ describe("dedicated review page seam", () => {
     expect(revealed).not.toContain("三");
     const continuation = renderReviewPage(buildReviewViewModel(data, route, state({ revealed: true, continuationOpen: true, continuationPly: 3 })));
     expect(continuation).toContain("三");
+    const laterContinuation = renderReviewPage(buildReviewViewModel(data, route, state({ revealed: true, continuationOpen: true, continuationPly: 4 })));
+    expect(laterContinuation).toContain("四");
   });
 
   it("clamps history to five plies and keeps anchor integrity explicit", () => {

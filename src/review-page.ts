@@ -74,7 +74,7 @@ export function findReviewEntry(data: AppData, route: ReviewRoute): { entry?: Re
 }
 
 export function anchorIsValid(game: Game, point: ReviewPoint): boolean {
-  return Number.isInteger(point.ply) && point.ply >= 0 && point.ply < game.sfens.length && point.sfen === game.sfens[point.ply];
+  return Number.isInteger(point.ply) && point.ply >= 0 && point.ply <= game.moves.length && point.ply < game.sfens.length && point.sfen === game.sfens[point.ply];
 }
 
 export function boundedHistoryPly(anchorPly: number, requestedPly: number): number {
@@ -146,7 +146,7 @@ export function renderReviewPage(vm: ReviewViewModel): string {
   const historyStart = Math.max(0, point.ply - 5);
   const history = game.moves.slice(historyStart, point.ply).map((move, index) => `<li><button type="button" data-review-history="${historyStart + index + 1}">${escapeReviewHtml(move)}</button></li>`).join("");
   const continuation = vm.continuationOpen
-    ? `<section class="panel continuation"><h2>實戰後續</h2><p>這裡是實戰後續第 ${Math.max(1, vm.continuationPly - point.ply)} 手。</p><ol class="moves">${game.moves.slice(point.ply, vm.continuationPly).map((move) => `<li>${escapeReviewHtml(move)}</li>`).join("")}</ol><a class="button-link" href="#/game/${encodeURIComponent(game.id)}?ply=${point.ply}">在原棋局繼續查看</a></section>`
+    ? `<section class="panel continuation"><h2>實戰後續</h2><p>這裡是實戰後續第 ${Math.max(1, vm.continuationPly - point.ply)} 手。</p><ol class="moves">${game.moves.slice(point.ply, vm.continuationPly).map((move) => `<li>${escapeReviewHtml(move)}</li>`).join("")}</ol>${vm.continuationPly < game.moves.length ? `<button type="button" data-review-continuation-step>下一手實戰後續</button>` : ""}<a class="button-link" href="#/game/${encodeURIComponent(game.id)}?ply=${point.ply}">在原棋局繼續查看</a></section>`
     : "";
   const revealed = vm.revealed ? `${answer(point)}${vm.continuationOpen ? continuation : point.ply < game.moves.length ? `<button type="button" data-review-continuation>查看實戰後續</button>` : "<p class=\"muted\">這局在儲存局面後沒有更多實戰後續。</p>"}` : `<button type="button" data-review-reveal>揭示記錄</button>`;
   return `<main class="review-page"><div class="review-header"><a href="#/games">← 棋局</a><p class="muted">${escapeReviewHtml(game.title)} · 第 ${point.ply} 手後</p><h1>重新思考</h1><p role="status" aria-live="polite">複盤進度 ${Math.max(0, vm.index + 1)} / ${vm.entries.length}</p></div><section class="panel review-study">${board(displaySfen, vm.orientation)}<p class="review-anchor-status" role="status">${atAnchor ? "儲存的決策局面" : "目前顯示的是決策局面之前的歷史"}</p><ol class="moves">${history}</ol><div class="replay-controls"><button type="button" data-review-prev-history ${vm.displayedPly <= historyStart ? "disabled" : ""}>上一個歷史局面</button><button type="button" data-review-anchor ${atAnchor ? "disabled" : ""}>回到決策局面</button></div><p>如果再次遇到這個局面，你會怎麼想？</p>${revealed}</section><nav class="review-navigation" aria-label="複盤局面導航"><button type="button" data-review-prev ${vm.index <= 0 ? "disabled" : ""}>上一個複盤局面</button><button type="button" data-review-next ${vm.index < 0 || vm.index >= vm.entries.length - 1 ? "disabled" : ""}>下一個複盤局面</button></nav></main>`;
