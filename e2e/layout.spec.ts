@@ -37,7 +37,7 @@ async function assertContained(page: Page): Promise<void> {
 }
 
 async function assertTargets(page: Page): Promise<void> {
-  const smallTargets = await page.locator("button:not(.moves button), a.button-link, header a, summary, input[type=file] + *").evaluateAll((elements) => elements.map((element) => {
+  const smallTargets = await page.locator("button:not(.moves button), a.button-link, a.nav-link, summary, input[type=file] + *").evaluateAll((elements) => elements.map((element) => {
     const box = element.getBoundingClientRect();
     return { width: box.width, height: box.height };
   }));
@@ -49,6 +49,15 @@ async function assertTargets(page: Page): Promise<void> {
   }
 }
 
+async function assertNavLink(page: Page, name: string, selector = "a.nav-link"): Promise<void> {
+  const link = page.locator(selector).filter({ hasText: name }).first();
+  await expect(link, `${name} nav link should exist`).toBeVisible();
+  const box = await link.boundingBox();
+  expect(box, `${name} nav link should have a box`).not.toBeNull();
+  expect(box!.width, `${name} nav link width`).toBeGreaterThanOrEqual(44);
+  expect(box!.height, `${name} nav link height`).toBeGreaterThanOrEqual(44);
+}
+
 test("route shells remain contained at every required width", async ({ page }) => {
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
@@ -56,11 +65,18 @@ test("route shells remain contained at every required width", async ({ page }) =
     await expect(page.locator("h1")).toBeVisible();
     await assertContained(page);
     await assertTargets(page);
+    await assertNavLink(page, "查看全部");
+    await assertNavLink(page, "設定", "header a.nav-link");
+    await page.goto("#/games");
+    await assertContained(page);
+    await assertNavLink(page, "← 首頁", "main .nav-link");
     await page.goto("#/settings");
     await assertContained(page);
+    await assertNavLink(page, "← 首頁", "main > a.nav-link");
     await page.goto("#/review/missing/long-invalid-id");
     await expect(page.locator('[role="alert"]')).toBeVisible();
     await assertContained(page);
+    await assertNavLink(page, "返回棋局", '[role="alert"] .nav-link');
   }
 });
 

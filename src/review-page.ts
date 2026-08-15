@@ -147,7 +147,7 @@ function answer(point: ReviewPoint): string {
 }
 
 export function renderReviewPage(vm: ReviewViewModel): string {
-  if (vm.status !== "ready" || !vm.game || !vm.point) return `<main class="review-page"><section class="panel" role="alert"><h1>${escapeReviewHtml(vm.reason ?? "複盤局面無效")}</h1><a class="button-link" href="#/games">返回棋局</a></section></main>`;
+  if (vm.status !== "ready" || !vm.game || !vm.point) return `<main class="review-page"><section class="panel" role="alert"><h1>${escapeReviewHtml(vm.reason ?? "複盤局面無效")}</h1><a class="button-link nav-link" href="#/games">返回棋局</a></section></main>`;
   const { game, point } = vm;
   const atAnchor = vm.phase === "anchor";
   const displaySfen = game.sfens[vm.displayedPly] ?? point.sfen;
@@ -159,5 +159,5 @@ export function renderReviewPage(vm: ReviewViewModel): string {
   const revealed = vm.revealed ? `${answer(point)}${vm.continuationOpen ? continuation : point.ply < game.moves.length ? `<button type="button" data-review-continuation>查看實戰後續</button>` : "<p class=\"muted\">這局在儲存局面後沒有更多實戰後續。</p>"}` : `<button type="button" data-review-reveal>揭示記錄</button>`;
   const phaseStatus = vm.phase === "history" ? "目前顯示的是決策局面之前的歷史" : vm.phase === "anchor" ? "儲存的決策局面" : `實戰後續第 ${vm.displayedPly - point.ply} 手`;
   const replayControls = vm.continuationOpen ? "" : `<div class="replay-controls"><button type="button" data-review-prev-history ${vm.displayedPly <= historyStart ? "disabled" : ""}>上一個歷史局面</button><button type="button" data-review-anchor ${atAnchor ? "disabled" : ""}>回到決策局面</button></div>`;
-  return `<main class="review-page"><div class="review-header"><a href="#/games">← 棋局</a><p class="muted">${escapeReviewHtml(game.title)} · 第 ${point.ply} 手後</p><h1>重新思考</h1><p role="status" aria-live="polite">複盤進度 ${Math.max(0, vm.index + 1)} / ${vm.entries.length}</p></div><section class="panel review-study">${board(displaySfen, vm.orientation)}<p class="review-anchor-status" role="status">${phaseStatus}</p><ol class="moves">${history}</ol>${replayControls}<p>如果再次遇到這個局面，你會怎麼想？</p>${revealed}</section><nav class="review-navigation" aria-label="複盤局面導航"><button type="button" data-review-prev ${vm.index <= 0 ? "disabled" : ""}>上一個複盤局面</button><button type="button" data-review-next ${vm.index < 0 || vm.index >= vm.entries.length - 1 ? "disabled" : ""}>下一個複盤局面</button></nav></main>`;
+  return `<main class="review-page"><div class="review-header"><a class="nav-link" href="#/games">← 棋局</a><p class="muted">${escapeReviewHtml(game.title)} · 第 ${point.ply} 手後</p><h1>重新思考</h1><p role="status" aria-live="polite">複盤進度 ${Math.max(0, vm.index + 1)} / ${vm.entries.length}</p></div><section class="panel review-study">${board(displaySfen, vm.orientation)}<p class="review-anchor-status" role="status">${phaseStatus}</p><ol class="moves">${history}</ol>${replayControls}<p>如果再次遇到這個局面，你會怎麼想？</p>${revealed}</section><nav class="review-navigation" aria-label="複盤局面導航"><button type="button" data-review-prev ${vm.index <= 0 ? "disabled" : ""}>上一個複盤局面</button><button type="button" data-review-next ${vm.index < 0 || vm.index >= vm.entries.length - 1 ? "disabled" : ""}>下一個複盤局面</button></nav></main>`;
 }
