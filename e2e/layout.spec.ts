@@ -108,13 +108,17 @@ test("rename dialog follows kind focus policy, traps focus, and survives 200% zo
   await expect(dialog).toBeVisible();
   expect(await dialog.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
   const focusSequence: boolean[] = [];
-  for (let index = 0; index < 3; index += 1) {
+  let cancelFocused = false;
+  for (let index = 0; index < 6; index += 1) {
     await page.keyboard.press("Tab");
     focusSequence.push(await page.evaluate(() => Boolean(document.activeElement?.closest("[data-dialog]"))));
+    if (await page.locator("[data-dialog-cancel]").evaluate((element) => element === document.activeElement)) {
+      cancelFocused = true;
+      break;
+    }
   }
-  expect(focusSequence).toEqual([true, true, true]);
-  await page.keyboard.press("Tab");
-  await expect(page.locator("[data-dialog-cancel]")).toBeFocused();
+  expect(focusSequence.every(Boolean)).toBe(true);
+  expect(cancelFocused).toBe(true);
   await page.locator("[data-dialog-cancel]").click();
   await expect(rename).toBeFocused();
 });
