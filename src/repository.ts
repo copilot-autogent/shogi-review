@@ -16,7 +16,7 @@ export interface ProfileRepository {
   deleteProfile(profile: ProfileKey): Promise<void>;
   loadSyncBase(profile: ProfileKey): Promise<SyncBaseRecord | null>;
   saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void>;
-  saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit?: () => boolean, signal?: AbortSignal): Promise<void>;
+  saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void>;
   deleteSyncBase(profile: ProfileKey): Promise<void>;
 }
 const empty: AppData = { games: [] };
@@ -50,7 +50,7 @@ export class MemoryProfileRepository implements ProfileRepository {
     return base ? globalThis.structuredClone(base) : null;
   }
   async saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void> { this.bases.set(profile, globalThis.structuredClone(base)); }
-  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit = () => true, signal?: AbortSignal): Promise<void> {
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void> {
     if (!canCommit() || signal?.aborted) throw new Error("同步身分已變更。");
     this.profiles.set(profile, globalThis.structuredClone(data));
     this.bases.set(profile, globalThis.structuredClone(base));
@@ -163,7 +163,7 @@ export class IndexedDbRepository implements Repository {
       transaction.onabort = () => reject(transaction.error ?? new Error("同步基準交易已取消。"));
     });
   }
-  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit = () => true, signal?: AbortSignal): Promise<void> {
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void> {
     const db = await this.dbPromise;
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(["profiles", "syncBases"], "readwrite");

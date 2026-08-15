@@ -14,7 +14,7 @@ export interface ConflictResolutionDependencies {
   cloud: SyncRepository;
   metadata: (uid: string, value: SyncSnapshot) => Promise<void> | void;
   onResolved: () => void;
-  signal?: AbortSignal;
+  signal: AbortSignal;
 }
 
 export type ConflictResolutionResult = "resolved" | "aborted";
@@ -224,22 +224,22 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   const ply = Number(item.entityId.split(":").at(-1));
   if (!Array.isArray(game.reviewPoints)) game.reviewPoints = [];
   const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
-  const sourcePoint = (Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : []).find((candidate) => candidate.ply === ply);
-  if (!sourcePoint) {
+  const sourceReviewPoint = (Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : []).find((candidate) => candidate.ply === ply);
+  if (!sourceReviewPoint) {
     game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
     return;
   }
   if (!point) {
-    game.reviewPoints.push(globalThis.structuredClone(sourcePoint));
+    game.reviewPoints.push(globalThis.structuredClone(sourceReviewPoint));
     return;
   }
-  if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourcePoint));
+  if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourceReviewPoint));
   else if (item.field.startsWith("issueTags.")) {
     const tag = item.field.slice("issueTags.".length) as IssueTag;
     point.issueTags = (Array.isArray(point.issueTags) ? point.issueTags : []).filter((candidate) => candidate !== tag);
-    if (Array.isArray(sourcePoint.issueTags) && sourcePoint.issueTags.includes(tag)) point.issueTags.push(tag);
+    if (Array.isArray(sourceReviewPoint.issueTags) && sourceReviewPoint.issueTags.includes(tag)) point.issueTags.push(tag);
     point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
-  } else (point as unknown as Record<string, unknown>)[item.field] = cloneValue((sourcePoint as unknown as Record<string, unknown>)[item.field]);
+  } else (point as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceReviewPoint as unknown as Record<string, unknown>)[item.field]);
 }
 
 function cloneValue(value: unknown): unknown {

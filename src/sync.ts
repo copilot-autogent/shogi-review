@@ -222,7 +222,9 @@ export class AutoSyncEngine {
       if (safeCloudBootstrap) {
         const current = await this.options.load();
         if (!this.valid(identity)) return "aborted";
-        if (await payloadHash(current) !== localHash) {
+        const currentHash = await payloadHash(current);
+        if (!this.valid(identity)) return "aborted";
+        if (currentHash !== localHash) {
           this.options.onConflict?.({ userId: identity.uid, profile: identity.profile, generation: identity.generation, rowRevision: row.revision, localHash, cloudData, mergedData: current, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local: current, cloud: cloudData, reason: "membership" }] });
           this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
           return "conflict";

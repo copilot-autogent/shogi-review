@@ -48,6 +48,7 @@ function harness(overrides: Partial<ConflictResolutionDependencies> = {}) {
       },
       metadata: async () => { writes.push("metadata"); },
       onResolved: () => { writes.push("resolved"); },
+      signal: new AbortController().signal,
       ...overrides,
     } satisfies ConflictResolutionDependencies,
     start() {
