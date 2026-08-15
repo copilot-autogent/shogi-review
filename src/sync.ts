@@ -100,6 +100,8 @@ export interface SyncRepository {
   read(userId: string): Promise<CloudState | null>;
   insert(userId: string, payload: unknown, revision: number): Promise<CloudState>;
   casUpdate(userId: string, revision: number, payload: unknown): Promise<CloudState>;
+  readWithSignal?: (userId: string, signal: AbortSignal) => Promise<CloudState | null>;
+  casUpdateWithSignal?: (userId: string, revision: number, payload: unknown, signal: AbortSignal) => Promise<CloudState>;
 }
 export class SupabaseSyncRepository implements SyncRepository {
   constructor(private readonly client: SupabaseClient = supabase) {}
@@ -108,6 +110,7 @@ export class SupabaseSyncRepository implements SyncRepository {
     if (error) throw error;
     return data as CloudState | null;
   }
+  readWithSignal(userId: string, signal: AbortSignal): Promise<CloudState | null> { return this.read(userId, signal); }
 
   async insert(userId: string, payload: unknown, revision: number, signal?: AbortSignal): Promise<CloudState> {
     const { data, error } = await this.client.from("user_state").insert({ user_id: userId, payload, revision }).select("user_id,payload,revision,updated_at").abortSignal(signal ?? new AbortController().signal);
@@ -121,6 +124,7 @@ export class SupabaseSyncRepository implements SyncRepository {
     if (!data || data.length !== 1) throw new Error("雲端版本已變更，請重新載入並選擇衝突處理方式。");
     return data[0] as CloudState;
   }
+  casUpdateWithSignal(userId: string, revision: number, payload: unknown, signal: AbortSignal): Promise<CloudState> { return this.casUpdate(userId, revision, payload, signal); }
 }
 
 export class AutoSyncEngine {

@@ -53,7 +53,7 @@ export async function resolveConflict(
   const readLocal = (): AppData => globalThis.structuredClone(deps.data());
   let latest: Awaited<ReturnType<SyncRepository["read"]>>;
   try {
-    latest = await withAbort(deps.cloud.read(identity.uid), deps.signal);
+    latest = await withAbort(deps.cloud.readWithSignal?.(identity.uid, deps.signal) ?? deps.cloud.read(identity.uid), deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
@@ -117,7 +117,7 @@ export async function resolveConflict(
   }
   let saved: Awaited<ReturnType<SyncRepository["casUpdate"]>>;
   try {
-    saved = await withAbort(deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next)), deps.signal);
+    saved = await withAbort(deps.cloud.casUpdateWithSignal?.(identity.uid, latest.revision, createCloudPayload(next), deps.signal) ?? deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next)), deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
