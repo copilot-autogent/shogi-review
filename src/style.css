@@ -78,6 +78,9 @@ details { margin: .8rem 0; }
 .review-navigation { display: flex; gap: .7rem; justify-content: space-between; margin-top: .8rem; }
 .review-navigation button { flex: 1 1 0; }
 #review-answer { border-top: 1px solid #ead9bf; padding-top: .8rem; }
+.recommendation-row { border: 1px solid #ead9bf; border-radius: 7px; padding: .6rem; margin: .6rem 0; }
+.recommendation-row label { margin: .35rem 0; }
+.recommendations { border-top: 1px solid #ead9bf; margin-top: .7rem; padding-top: .7rem; }
 .continuation { margin-top: .8rem; }
 .compact-actions { display: inline-block; }
 .compact-actions summary { min-height: 44px; padding: .65rem .8rem; cursor: pointer; }

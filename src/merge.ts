@@ -1,4 +1,5 @@
-import { ISSUE_TAGS, type AppData, type Game, type IssueTag, type ReviewPoint } from "./model.js";
+import { ISSUE_TAGS, type AppData, type Game, type IssueTag, type RecommendedMove, type ReviewPoint } from "./model.js";
+import { normalizeRecommendedMoves, recommendationMap } from "./recommendations.js";
 
 export type MergeEntity = "game" | "review";
 export interface MergeConflict {
@@ -41,6 +42,9 @@ function normalizePoint(point: ReviewPoint): ReviewPoint {
   if (result.note === undefined) delete result.note;
   if (result.externalNotes === undefined) delete result.externalNotes;
   if (result.legacyNotes === undefined) delete result.legacyNotes;
+  const recommendations = normalizeRecommendedMoves(result.recommendedMoves);
+  if (recommendations === undefined) delete result.recommendedMoves;
+  else result.recommendedMoves = recommendations;
   return result;
 }
 function normalizeGame(game: Game): Game {
@@ -133,7 +137,51 @@ function mergeReviews(base: ReviewPoint | undefined, local: ReviewPoint, cloud: 
   result.externalNotes = mergeScalar("review", identity, "externalNotes", base?.externalNotes, local.externalNotes, cloud.externalNotes, conflicts);
   result.legacyNotes = mergeScalar("review", identity, "legacyNotes", base?.legacyNotes, local.legacyNotes, cloud.legacyNotes, conflicts);
   result.issueTags = mergeTags(identity, tags(base?.issueTags), tags(local.issueTags), tags(cloud.issueTags), conflicts);
+  result.recommendedMoves = mergeRecommendations(identity, base?.recommendedMoves, local.recommendedMoves, cloud.recommendedMoves, conflicts);
   return normalizePoint(result);
+}
+function mergeRecommendations(
+  reviewId: string,
+  baseValue: RecommendedMove[] | undefined,
+  localValue: RecommendedMove[] | undefined,
+  cloudValue: RecommendedMove[] | undefined,
+  conflicts: MergeConflict[],
+): RecommendedMove[] | undefined {
+  const base = recommendationMap(baseValue);
+  const local = recommendationMap(localValue);
+  const cloud = recommendationMap(cloudValue);
+  const ids = [...new Set([...base.keys(), ...local.keys(), ...cloud.keys()])];
+  const merged = ids.flatMap((id) => {
+    const ancestor = base.get(id);
+    const left = local.get(id);
+    const right = cloud.get(id);
+    let item: RecommendedMove | undefined;
+    if (!ancestor) item = left && right ? mergeRecommendation(reviewId, id, undefined, left, right, conflicts) : clone(left ?? right);
+    else if (!left && !right) item = undefined;
+    else if (!left && right) {
+      if (stable(right) === stable(ancestor)) item = undefined;
+      else { conflict(conflicts, "review", reviewId, `recommendedMoves.${id}.__membership`, ancestor, left, right, "membership"); item = clone(right); }
+    } else if (left && !right) {
+      if (stable(left) === stable(ancestor)) item = undefined;
+      else { conflict(conflicts, "review", reviewId, `recommendedMoves.${id}.__membership`, ancestor, left, right, "membership"); item = clone(left); }
+    } else item = mergeRecommendation(reviewId, id, ancestor, left!, right!, conflicts);
+    return item ? [item] : [];
+  });
+  const baseOrder = baseValue?.map((item) => item.id) ?? [];
+  const localOrder = localValue?.map((item) => item.id) ?? [];
+  const cloudOrder = cloudValue?.map((item) => item.id) ?? [];
+  const same = (left: string[], right: string[]) => left.join("\u0000") === right.join("\u0000");
+  const preferred = same(localOrder, baseOrder) ? cloudOrder : same(cloudOrder, baseOrder) ? localOrder : localOrder.join("\u0000") <= cloudOrder.join("\u0000") ? localOrder : cloudOrder;
+  const order = [...preferred.filter((id) => merged.some((item) => item.id === id)),
+    ...merged.map((item) => item.id).filter((id) => !preferred.includes(id)).sort()];
+  const ordered = order.flatMap((id) => merged.filter((item) => item.id === id));
+  return ordered.length ? ordered : undefined;
+}
+function mergeRecommendation(reviewId: string, id: string, base: RecommendedMove | undefined, local: RecommendedMove, cloud: RecommendedMove, conflicts: MergeConflict[]): RecommendedMove {
+  const result: RecommendedMove = { id, move: local.move };
+  result.move = mergeScalar("review", reviewId, `recommendedMoves.${id}.move`, base?.move, local.move, cloud.move, conflicts) ?? local.move;
+  result.comment = mergeScalar("review", reviewId, `recommendedMoves.${id}.comment`, base?.comment, local.comment, cloud.comment, conflicts);
+  return normalizeRecommendedMoves([result])![0]!;
 }
 function mergeMembership<T extends { id: string }>(
   entity: MergeEntity, id: string, base: T | undefined, local: T | undefined, cloud: T | undefined,
