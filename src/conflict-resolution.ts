@@ -87,6 +87,17 @@ export async function resolveConflict(
   }
   const nextHash = await payloadHash(next);
   if (!ensureValid()) return abort();
+  const latestLocal = readLocal();
+  const latestLocalHash = await payloadHash(latestLocal);
+  if (!ensureValid()) return abort();
+  if (latestLocalHash !== localHash) {
+    const refreshed = conflict.baseData
+      ? mergeAppData(conflict.baseData, latestLocal, conflict.cloudData)
+      : { data: latestLocal, conflicts: conflict.conflicts };
+    if (!ensureValid()) return abort();
+    deps.setPending({ ...conflict, localHash: latestLocalHash, mergedData: refreshed.data, conflicts: refreshed.conflicts });
+    throw new Error("本機資料已更新，請重新確認目前資料。");
+  }
   const saved = await deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next));
   // CAS may win immediately before logout; the post-CAS guard prevents that result
   // from crossing into the next profile's local, base, metadata, or UI state.
