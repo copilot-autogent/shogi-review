@@ -45,7 +45,7 @@ export interface SyncEngineOptions {
   saveBase?: (uid: string, base: SyncBaseRecord) => Promise<void>;
   cloud: SyncRepository;
   onStatus?: (status: SyncStatus, message?: string) => void;
-  onConflict?: (conflict: { userId: string; rowRevision: number; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] }) => void;
+  onConflict?: (conflict: { userId: string; rowRevision: number; localHash: string; baseData?: AppData; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] }) => void;
 }
 export type SyncResult = "synced" | "conflict" | "aborted";
 
@@ -212,7 +212,7 @@ export class AutoSyncEngine {
         const current = await this.options.load();
         if (!this.valid(identity)) return "aborted";
         if (await payloadHash(current) !== localHash) {
-          this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData, mergedData: current, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local: current, cloud: cloudData, reason: "membership" }] });
+          this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, localHash, cloudData, mergedData: current, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local: current, cloud: cloudData, reason: "membership" }] });
           this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
           return "conflict";
         }
@@ -221,13 +221,13 @@ export class AutoSyncEngine {
         if (!await this.saveBase(identity, cloudData, row.revision, cloudHash, row.updated_at)) return "aborted";
         return "synced";
       }
-      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData, mergedData: local, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local, cloud: cloudData, reason: "membership" }] });
+      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, localHash, cloudData, mergedData: local, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local, cloud: cloudData, reason: "membership" }] });
       this.options.onStatus?.("衝突", "首次同步需要確認本機與雲端資料。");
       return "conflict";
     }
     const merged = mergeAppData(base.data, local, cloudData);
     if (merged.conflicts.length) {
-      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData, mergedData: merged.data, conflicts: merged.conflicts });
+      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, localHash, baseData: base.data, cloudData, mergedData: merged.data, conflicts: merged.conflicts });
       this.options.onStatus?.("衝突", "只有相同棋局、局面或欄位需要選擇；其他變更已預覽合併。");
       return "conflict";
     }

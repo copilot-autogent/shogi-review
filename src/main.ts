@@ -2,7 +2,7 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, PERSPECTIVES, REASONS, type AppData, type Game, type IssueTag, type Perspective, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryProfileRepository, type ProfileKey, type ProfileRepository } from "./repository.js";
-import type { MergeConflict } from "./merge.js";
+import { mergeAppData, type MergeConflict } from "./merge.js";
 import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
@@ -23,7 +23,7 @@ let renderedRoute = "";
 let syncStatus: SyncStatus = "僅本機";
 let syncMessage = "";
 let syncMetadata: SyncMetadata = { hashVersion: 1 };
-let pendingConflict: { userId: string; rowRevision: number; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] } | undefined;
+let pendingConflict: { userId: string; rowRevision: number; localHash: string; baseData?: AppData; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] } | undefined;
 let dialogBusy = false;
 let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
@@ -257,7 +257,12 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
       await resolveConflict(choices);
     }
     dialogBusy = false; closeDialog(); render();
-  } catch (error) { dialogBusy = false; if (submit) submit.disabled = false; showError(error); }
+  } catch (error) {
+    dialogBusy = false;
+    if (submit) submit.disabled = false;
+    showError(error);
+    if (kind === "conflict" && pendingConflict) { closeDialog(); render(); }
+  }
 }
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
 async function importText(): Promise<void> { updateImportDraft(); try { await addGame(importDraft.source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
@@ -281,8 +286,25 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
   if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
   if (latest.revision !== conflict.rowRevision) {
     const parsed = validateCloudPayload(latest.payload);
-    pendingConflict = { ...conflict, rowRevision: latest.revision, cloudData: parsed };
+    const refreshed = conflict.baseData
+      ? mergeAppData(conflict.baseData, data, parsed)
+      : { data, conflicts: conflict.conflicts };
+    pendingConflict = {
+      ...conflict,
+      rowRevision: latest.revision,
+      localHash: await payloadHash(data),
+      cloudData: parsed,
+      mergedData: refreshed.data,
+      conflicts: refreshed.conflicts,
+    };
     throw new Error("雲端已更新，請重新確認目前資料。");
+  }
+  if (await payloadHash(data) !== conflict.localHash) {
+    const refreshed = conflict.baseData
+      ? mergeAppData(conflict.baseData, data, conflict.cloudData)
+      : { data, conflicts: conflict.conflicts };
+    pendingConflict = { ...conflict, localHash: await payloadHash(data), mergedData: refreshed.data, conflicts: refreshed.conflicts };
+    throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   const next = globalThis.structuredClone(conflict.mergedData);
   for (const [index, selected] of Object.entries(choices)) {
