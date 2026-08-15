@@ -35,6 +35,23 @@ export interface SyncSnapshot {
   hashVersion: number;
   lastSyncedAt?: string;
 }
+export interface PendingConflict {
+  userId: string;
+  profile: ProfileKey;
+  generation: number;
+  rowRevision: number;
+  localHash: string;
+  baseData?: AppData;
+  cloudData: AppData;
+  mergedData: AppData;
+  conflicts: MergeConflict[];
+  localRecovery?: {
+    expectedLocalHash: string;
+    committedData: AppData;
+    revision: number;
+    payloadHash: string;
+  };
+}
 export interface SyncEngineOptions {
   identity: () => SyncIdentity | null;
   load: () => Promise<AppData>;
@@ -45,7 +62,7 @@ export interface SyncEngineOptions {
   saveBase?: (uid: string, base: SyncBaseRecord) => Promise<void>;
   cloud: SyncRepository;
   onStatus?: (status: SyncStatus, message?: string) => void;
-  onConflict?: (conflict: { userId: string; rowRevision: number; localHash: string; baseData?: AppData; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] }) => void;
+  onConflict?: (conflict: PendingConflict) => void;
 }
 export type SyncResult = "synced" | "conflict" | "aborted";
 
@@ -89,27 +106,31 @@ export interface SyncRepository {
   read(userId: string): Promise<CloudState | null>;
   insert(userId: string, payload: unknown, revision: number): Promise<CloudState>;
   casUpdate(userId: string, revision: number, payload: unknown): Promise<CloudState>;
+  readWithSignal?: (userId: string, signal: AbortSignal) => Promise<CloudState | null>;
+  casUpdateWithSignal?: (userId: string, revision: number, payload: unknown, signal: AbortSignal) => Promise<CloudState>;
 }
 export class SupabaseSyncRepository implements SyncRepository {
   constructor(private readonly client: SupabaseClient = supabase) {}
-  async read(userId: string): Promise<CloudState | null> {
-    const { data, error } = await this.client.from("user_state").select("user_id,payload,revision,updated_at").eq("user_id", userId).maybeSingle();
+  async read(userId: string, signal?: AbortSignal): Promise<CloudState | null> {
+    const { data, error } = await this.client.from("user_state").select("user_id,payload,revision,updated_at").eq("user_id", userId).abortSignal(signal ?? new AbortController().signal).maybeSingle();
     if (error) throw error;
     return data as CloudState | null;
   }
+  readWithSignal(userId: string, signal: AbortSignal): Promise<CloudState | null> { return this.read(userId, signal); }
 
-  async insert(userId: string, payload: unknown, revision: number): Promise<CloudState> {
-    const { data, error } = await this.client.from("user_state").insert({ user_id: userId, payload, revision }).select("user_id,payload,revision,updated_at");
+  async insert(userId: string, payload: unknown, revision: number, signal?: AbortSignal): Promise<CloudState> {
+    const { data, error } = await this.client.from("user_state").insert({ user_id: userId, payload, revision }).select("user_id,payload,revision,updated_at").abortSignal(signal ?? new AbortController().signal);
     if (error) throw error;
     if (!data || data.length !== 1) throw new Error("雲端初始化未確認單筆寫入。");
     return data[0] as CloudState;
   }
-  async casUpdate(userId: string, revision: number, payload: unknown): Promise<CloudState> {
-    const { data, error } = await this.client.from("user_state").update({ payload, revision: revision + 1 }).eq("user_id", userId).eq("revision", revision).select("user_id,payload,revision,updated_at");
+  async casUpdate(userId: string, revision: number, payload: unknown, signal?: AbortSignal): Promise<CloudState> {
+    const { data, error } = await this.client.from("user_state").update({ payload, revision: revision + 1 }).eq("user_id", userId).eq("revision", revision).select("user_id,payload,revision,updated_at").abortSignal(signal ?? new AbortController().signal);
     if (error) throw error;
     if (!data || data.length !== 1) throw new Error("雲端版本已變更，請重新載入並選擇衝突處理方式。");
     return data[0] as CloudState;
   }
+  casUpdateWithSignal(userId: string, revision: number, payload: unknown, signal: AbortSignal): Promise<CloudState> { return this.casUpdate(userId, revision, payload, signal); }
 }
 
 export class AutoSyncEngine {
@@ -211,8 +232,10 @@ export class AutoSyncEngine {
       if (safeCloudBootstrap) {
         const current = await this.options.load();
         if (!this.valid(identity)) return "aborted";
-        if (await payloadHash(current) !== localHash) {
-          this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, localHash, cloudData, mergedData: current, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local: current, cloud: cloudData, reason: "membership" }] });
+        const currentHash = await payloadHash(current);
+        if (!this.valid(identity)) return "aborted";
+        if (currentHash !== localHash) {
+          this.options.onConflict?.({ userId: identity.uid, profile: identity.profile, generation: identity.generation, rowRevision: row.revision, localHash: currentHash, cloudData, mergedData: current, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local: current, cloud: cloudData, reason: "membership" }] });
           this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
           return "conflict";
         }
@@ -221,13 +244,13 @@ export class AutoSyncEngine {
         if (!await this.saveBase(identity, cloudData, row.revision, cloudHash, row.updated_at)) return "aborted";
         return "synced";
       }
-      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, localHash, cloudData, mergedData: local, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local, cloud: cloudData, reason: "membership" }] });
+      this.options.onConflict?.({ userId: identity.uid, profile: identity.profile, generation: identity.generation, rowRevision: row.revision, localHash, cloudData, mergedData: local, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local, cloud: cloudData, reason: "membership" }] });
       this.options.onStatus?.("衝突", "首次同步需要確認本機與雲端資料。");
       return "conflict";
     }
     const merged = mergeAppData(base.data, local, cloudData);
     if (merged.conflicts.length) {
-      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, localHash, baseData: base.data, cloudData, mergedData: merged.data, conflicts: merged.conflicts });
+      this.options.onConflict?.({ userId: identity.uid, profile: identity.profile, generation: identity.generation, rowRevision: row.revision, localHash, baseData: base.data, cloudData, mergedData: merged.data, conflicts: merged.conflicts });
       this.options.onStatus?.("衝突", "只有相同棋局、局面或欄位需要選擇；其他變更已預覽合併。");
       return "conflict";
     }
