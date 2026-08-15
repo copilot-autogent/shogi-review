@@ -16,7 +16,7 @@ export interface ProfileRepository {
   deleteProfile(profile: ProfileKey): Promise<void>;
   loadSyncBase(profile: ProfileKey): Promise<SyncBaseRecord | null>;
   saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void>;
-  saveProfileAndBase?(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void>;
+  saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void>;
   deleteSyncBase(profile: ProfileKey): Promise<void>;
 }
 const empty: AppData = { games: [] };
@@ -185,6 +185,10 @@ export class IndexedDbRepository implements Repository {
         if (settled) return;
         settled = true;
         signal?.removeEventListener("abort", abort);
+        if (!canCommit()) {
+          reject(new Error("同步身分已變更。"));
+          return;
+        }
         resolve();
       };
       transaction.onerror = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };
