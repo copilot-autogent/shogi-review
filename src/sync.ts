@@ -103,20 +103,20 @@ export interface SyncRepository {
 }
 export class SupabaseSyncRepository implements SyncRepository {
   constructor(private readonly client: SupabaseClient = supabase) {}
-  async read(userId: string): Promise<CloudState | null> {
-    const { data, error } = await this.client.from("user_state").select("user_id,payload,revision,updated_at").eq("user_id", userId).maybeSingle();
+  async read(userId: string, signal?: AbortSignal): Promise<CloudState | null> {
+    const { data, error } = await this.client.from("user_state").select("user_id,payload,revision,updated_at").eq("user_id", userId).abortSignal(signal ?? new AbortController().signal).maybeSingle();
     if (error) throw error;
     return data as CloudState | null;
   }
 
-  async insert(userId: string, payload: unknown, revision: number): Promise<CloudState> {
-    const { data, error } = await this.client.from("user_state").insert({ user_id: userId, payload, revision }).select("user_id,payload,revision,updated_at");
+  async insert(userId: string, payload: unknown, revision: number, signal?: AbortSignal): Promise<CloudState> {
+    const { data, error } = await this.client.from("user_state").insert({ user_id: userId, payload, revision }).select("user_id,payload,revision,updated_at").abortSignal(signal ?? new AbortController().signal);
     if (error) throw error;
     if (!data || data.length !== 1) throw new Error("雲端初始化未確認單筆寫入。");
     return data[0] as CloudState;
   }
-  async casUpdate(userId: string, revision: number, payload: unknown): Promise<CloudState> {
-    const { data, error } = await this.client.from("user_state").update({ payload, revision: revision + 1 }).eq("user_id", userId).eq("revision", revision).select("user_id,payload,revision,updated_at");
+  async casUpdate(userId: string, revision: number, payload: unknown, signal?: AbortSignal): Promise<CloudState> {
+    const { data, error } = await this.client.from("user_state").update({ payload, revision: revision + 1 }).eq("user_id", userId).eq("revision", revision).select("user_id,payload,revision,updated_at").abortSignal(signal ?? new AbortController().signal);
     if (error) throw error;
     if (!data || data.length !== 1) throw new Error("雲端版本已變更，請重新載入並選擇衝突處理方式。");
     return data[0] as CloudState;

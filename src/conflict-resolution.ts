@@ -141,6 +141,7 @@ export async function resolveConflict(
     await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid, deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
+    deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: nextHash, cloudData: next, mergedData: next, conflicts: [] });
     throw error;
   }
   if (!ensureValid()) return abort();

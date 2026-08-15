@@ -50,7 +50,7 @@ export class MemoryProfileRepository implements ProfileRepository {
     return base ? globalThis.structuredClone(base) : null;
   }
   async saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void> { this.bases.set(profile, globalThis.structuredClone(base)); }
-  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal): Promise<void> {
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal?: AbortSignal): Promise<void> {
     if (!canCommit() || signal?.aborted) throw new Error("同步身分已變更。");
     this.profiles.set(profile, globalThis.structuredClone(data));
     this.bases.set(profile, globalThis.structuredClone(base));
