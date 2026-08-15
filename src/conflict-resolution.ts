@@ -161,6 +161,9 @@ export async function resolveConflict(
     throw error;
   }
   if (!ensureValid()) return abort();
+  const finalLocalHash = await payloadHash(readLocal());
+  if (!ensureValid()) return abort();
+  if (finalLocalHash !== localHash) return abort();
   deps.setData(next);
   if (!ensureValid()) return abort();
   deps.setPending(undefined);
@@ -217,7 +220,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
         ...existingReviewPoints.filter((point) => !sourceReviewPoints.some((sourcePoint) => sourcePoint.ply === point.ply)),
       ].sort((left, right) => left.ply - right.ply);
     }
-    else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceGame as unknown as Record<string, unknown>)[item.field]);
+    else (game as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
   }
   if (!game || !sourceGame) return;
