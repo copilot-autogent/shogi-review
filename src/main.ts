@@ -362,7 +362,7 @@ function updateDialogGate(): void {
 function dialogKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape" && !dialogBusy) { closeDialog(); return; }
   if (event.key !== "Tab") return;
-  const focusable = Array.from(document.querySelectorAll<HTMLElement>("[data-dialog] button:not([disabled]), [data-dialog] input:not([disabled])")); if (!focusable.length) return;
+  const focusable = Array.from(document.querySelectorAll<HTMLElement>("[data-dialog] button:not([disabled]), [data-dialog] input:not([disabled]), [data-dialog] select:not([disabled]), [data-dialog] textarea:not([disabled]), [data-dialog] a[href]")).filter((element) => element.offsetParent !== null); if (!focusable.length) return;
   const index = focusable.indexOf(document.activeElement as HTMLElement); const next = focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length]; event.preventDefault(); next?.focus();
 }
 function closeDialog(): void { if (dialogBusy) return; document.querySelector("[data-dialog]")?.remove(); document.body.classList.remove("dialog-lock"); dialogReturnFocus?.focus(); dialogReturnFocus = null; }

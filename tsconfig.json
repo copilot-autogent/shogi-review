@@ -9,5 +9,5 @@
     "lib": ["ES2022", "DOM"],
     "types": ["vitest/globals"]
   },
-  "include": ["src", "vite.config.ts", "eslint.config.js"]
+  "include": ["src", "vite.config.ts", "playwright.config.ts", "e2e"]
 }

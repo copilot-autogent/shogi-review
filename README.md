@@ -9,7 +9,17 @@ npm install
 npm run lint
 npm run test:coverage
 npm run build
+npm run test:e2e
 ```
+
+`test:e2e` starts `vite preview` and runs real Chromium layout checks. The PR
+workflow installs Chromium and uploads Playwright screenshots, traces, and
+reports on failure. The responsive audit covers 320, 360, 390, 768, and 1280
+CSS pixels, including import, replay, review reveal/continuation, settings, and
+invalid review routes. Primary, secondary, destructive, navigation, dialog,
+account, and import controls are at least 44px; dense move-list rows are
+intentionally documented at a keyboard-accessible 36px minimum. Physical
+devices and authenticated Google/Supabase sessions remain outside CI.
 
 The app is deployed at `/shogi-review/` with UTC date bucketing. It uses
 [tsshogi](https://github.com/sunfish-shogi/tsshogi) (MIT) for notation parsing,
