@@ -14,7 +14,7 @@ const kif = `手合割：平手
 
    1 ７六歩(77)
    2 ３四歩(33)
-   3 ２六歩(26)
+   3 ２六歩(27)
 `;
 
 async function assertContained(page: Page): Promise<void> {
