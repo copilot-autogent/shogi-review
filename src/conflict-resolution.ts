@@ -146,7 +146,11 @@ export async function resolveConflict(
   const persistedLocalHash = await payloadHash(readLocal());
   if (!ensureValid()) return abort();
   if (persistedLocalHash !== localHash) {
-    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: persistedLocalHash, cloudData: next, mergedData: readLocal(), conflicts: conflict.conflicts });
+    const latestLocal = readLocal();
+    const refreshed = conflict.baseData
+      ? mergeAppData(conflict.baseData, latestLocal, next)
+      : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: next, reason: "membership" as const })) };
+    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: persistedLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
@@ -191,7 +195,8 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
     target.games = globalThis.structuredClone(source.games);
     return;
   }
-  const gameId = item.entity === "review" ? item.entityId.slice(0, item.entityId.lastIndexOf(":")) : item.entityId;
+  const separator = item.entityId.lastIndexOf(":");
+  const gameId = item.entity === "review" && separator > 0 ? item.entityId.slice(0, separator) : item.entityId;
   const game = target.games.find((candidate) => candidate.id === gameId);
   const sourceGame = source.games.find((candidate) => candidate.id === gameId);
   if (item.entity === "game") {

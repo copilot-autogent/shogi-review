@@ -169,17 +169,18 @@ export class IndexedDbRepository implements Repository {
       const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
       let settled = false;
       const abort = () => { if (!settled) transaction.abort(); };
-      if (!canCommit() || signal?.aborted) { abort(); reject(new Error("同步身分已變更。")); return; }
+      if (!canCommit() || signal?.aborted) { settled = true; abort(); reject(new Error("同步身分已變更。")); return; }
       signal?.addEventListener("abort", abort, { once: true });
       transaction.objectStore("profiles").put(createBackup(data), profile);
       transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
       transaction.oncomplete = () => {
+        if (settled) return;
         settled = true;
         signal?.removeEventListener("abort", abort);
         resolve();
       };
-      transaction.onerror = () => { settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };
-      transaction.onabort = () => { settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料交易已取消。")); };
+      transaction.onerror = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };
+      transaction.onabort = () => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料交易已取消。")); };
     });
   }
   async deleteSyncBase(profile: ProfileKey): Promise<void> {
