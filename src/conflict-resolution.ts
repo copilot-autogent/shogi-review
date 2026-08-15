@@ -14,6 +14,7 @@ export interface ConflictResolutionDependencies {
   cloud: SyncRepository;
   metadata: (uid: string, value: SyncSnapshot) => Promise<void> | void;
   onResolved: () => void;
+  signal?: AbortSignal;
 }
 
 export type ConflictResolutionResult = "resolved" | "aborted";
@@ -37,6 +38,7 @@ export async function resolveConflict(
       && current.uid === identity.uid
       && current.profile === identity.profile
       && current.generation === identity.generation
+      && !deps.signal?.aborted
       && pending
       && pending === conflict
       && sameConflictIdentity(identity, pending)
@@ -56,7 +58,10 @@ export async function resolveConflict(
     throw error;
   }
   if (!ensureValid()) return abort();
-  if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
+  if (!latest) {
+    if (!ensureValid()) return abort();
+    throw new Error("雲端資料已不存在，未覆蓋本機資料。");
+  }
   const local = readLocal();
   const latestCloud = validateCloudPayload(latest.payload);
   if (latest.revision !== conflict.rowRevision) {
@@ -132,7 +137,7 @@ export async function resolveConflict(
   }
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
   try {
-    await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid);
+    await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid, deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
@@ -142,8 +147,6 @@ export async function resolveConflict(
   try {
     await deps.metadata(identity.uid, metadata);
   } catch (error) {
-    if (!ensureValid()) return abort();
-    deps.setData(next);
     if (!ensureValid()) return abort();
     throw error;
   }
@@ -183,8 +186,8 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   }
   if (!game || !sourceGame) return;
   const ply = Number(item.entityId.split(":").at(-1));
-  const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
-  const sourcePoint = sourceGame.reviewPoints.find((candidate) => candidate.ply === ply);
+  const point = (Array.isArray(game.reviewPoints) ? game.reviewPoints : []).find((candidate) => candidate.ply === ply);
+  const sourcePoint = (Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : []).find((candidate) => candidate.ply === ply);
   if (!sourcePoint) {
     if (item.field === "__membership" || item.field === "anchor") game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
     return;
