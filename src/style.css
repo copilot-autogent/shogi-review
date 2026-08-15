@@ -23,7 +23,7 @@ header a { color: #fff; }
 .brand span, .sync-copy { display: block; font-size: .82rem; opacity: .85; }
 .account { gap: .7rem; text-align: right; justify-content: flex-end; }
 .account a { white-space: normal; overflow-wrap: anywhere; }
-.account > a { min-height: 44px; display: inline-flex; align-items: center; }
+.account > a { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
 .avatar { display: grid; place-items: center; width: 2.4rem; height: 2.4rem; border-radius: 50%; background: #f3c777; color: #5c2f1b; font-weight: 800; }
 h1, h2, h3, p { margin-top: 0; overflow-wrap: anywhere; }
 h1 { font-size: var(--text-h1); line-height: 1.15; }

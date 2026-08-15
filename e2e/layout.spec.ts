@@ -67,6 +67,7 @@ test("route shells remain contained at every required width", async ({ page }) =
 test("import, game, review reveal and continuation stay usable on a phone", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("#/import");
+  await page.locator("#import-panel summary").click();
   await page.locator("#title").fill("這是一個非常長的棋局標題，用來確認它不會把操作推到畫面之外");
   await page.locator("#source").fill(kif);
   await page.locator("#import").click();
@@ -95,6 +96,7 @@ test("import, game, review reveal and continuation stay usable on a phone", asyn
 test("rename dialog follows kind focus policy, traps focus, and survives 200% zoom", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
   await page.goto("#/import");
+  await page.locator("#import-panel summary").click();
   await page.locator("#title").fill("可供對話框測試的棋局");
   await page.locator("#source").fill(kif);
   await page.locator("#import").click();
