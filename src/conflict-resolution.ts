@@ -216,7 +216,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
       const sourceReviewPoints = Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : [];
       Object.assign(game, globalThis.structuredClone(sourceGame));
       game.reviewPoints = [
-        ...sourceReviewPoints,
+        ...globalThis.structuredClone(sourceReviewPoints),
         ...existingReviewPoints.filter((point) => !sourceReviewPoints.some((sourcePoint) => sourcePoint.ply === point.ply)),
       ].sort((left, right) => left.ply - right.ply);
     }

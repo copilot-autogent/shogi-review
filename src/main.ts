@@ -290,12 +290,20 @@ async function removeLocalAccount(): Promise<void> {
   const previousUser = activeUser;
   const previousProfile = activeProfile;
   const previousPending = pendingConflict;
+  const previousGeneration = profileGeneration;
   conflictResolutionAbort?.abort();
   removingLocalAccount = true;
   profileGeneration += 1;
   autosync.invalidate();
   const { error } = await supabase.auth.signOut();
-  if (error) { removingLocalAccount = false; throw new Error(`登出失敗：${error.message}`); }
+  if (error) {
+    removingLocalAccount = false;
+    activeUser = previousUser;
+    activeProfile = previousProfile;
+    pendingConflict = previousPending;
+    profileGeneration = previousGeneration;
+    throw new Error(`登出失敗：${error.message}`);
+  }
   try {
     await repo.deleteProfile(`user:${uid}`);
     await repo.deleteSyncBase(`user:${uid}`);
@@ -305,9 +313,10 @@ async function removeLocalAccount(): Promise<void> {
     await activateProfile("guest");
     updateSyncStatus("僅本機");
   } catch (error) {
-    activeUser = previousUser;
-    activeProfile = previousProfile;
-    pendingConflict = previousPending;
+    activeUser = null;
+    activeProfile = "guest";
+    pendingConflict = undefined;
+    await activateProfile("guest");
     throw error;
   } finally {
     removingLocalAccount = false;
