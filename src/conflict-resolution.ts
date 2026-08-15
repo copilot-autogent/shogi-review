@@ -95,6 +95,10 @@ export async function resolveConflict(
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   const next = globalThis.structuredClone(conflict.mergedData);
+  for (let index = 0; index < conflict.conflicts.length; index += 1) {
+    const choice = choices[String(index)];
+    if (choice !== "local" && choice !== "cloud") throw new Error("請為每個衝突欄位選擇本機或雲端。");
+  }
   const selectedChoices = Object.entries(choices).sort(([left], [right]) => {
     const leftItem = conflict.conflicts[Number(left)];
     const rightItem = conflict.conflicts[Number(right)];
@@ -149,7 +153,7 @@ export async function resolveConflict(
   }
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
   try {
-    await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid, deps.signal);
+    await deps.repository.saveProfileAndBase(identity.profile, next, base, () => ensureValid() && deps.localVersion() === localVersion, deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: nextHash, cloudData: next, mergedData: next, conflicts: [] });
