@@ -143,6 +143,12 @@ export async function resolveConflict(
     throw error;
   }
   if (!ensureValid()) return abort();
+  const persistedLocalHash = await payloadHash(readLocal());
+  if (!ensureValid()) return abort();
+  if (persistedLocalHash !== localHash) {
+    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: persistedLocalHash, cloudData: next, mergedData: readLocal(), conflicts: conflict.conflicts });
+    throw new Error("本機資料已更新，請重新確認目前資料。");
+  }
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
   try {
     await deps.metadata(identity.uid, metadata);
