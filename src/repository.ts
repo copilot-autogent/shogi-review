@@ -176,7 +176,6 @@ export class IndexedDbRepository implements Repository {
       transaction.oncomplete = () => {
         settled = true;
         signal?.removeEventListener("abort", abort);
-        if (!canCommit()) { reject(new Error("同步身分已變更。")); return; }
         resolve();
       };
       transaction.onerror = () => { settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };

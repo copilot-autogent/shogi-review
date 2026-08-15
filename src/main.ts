@@ -309,11 +309,13 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
       setData: (next) => { data = globalThis.structuredClone(next); },
       repository: repo,
       cloud: new SupabaseSyncRepository(),
-      metadata: (uid, value) => {
+      metadata: async (uid, value) => {
         const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
         if (current?.uid !== uid || pendingConflict?.profile !== current.profile || pendingConflict.generation !== current.generation) throw new Error("同步身分已變更。");
+        await writeMetadata(uid, value);
+        const after = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        if (after?.uid !== uid || pendingConflict?.profile !== after.profile || pendingConflict.generation !== after.generation) throw new Error("同步身分已變更。");
         syncMetadata = value;
-        return Promise.resolve(writeMetadata(uid, value));
       },
       onResolved: () => updateSyncStatus("已同步"),
       signal: abortController.signal,

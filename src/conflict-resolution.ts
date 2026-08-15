@@ -1,6 +1,6 @@
 import type { AppData, IssueTag } from "./model.js";
 import { mergeAppData, type MergeConflict } from "./merge.js";
-import { canonicalData, createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
+import { createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
 import type { ProfileRepository, SyncBaseRecord } from "./repository.js";
 import { ISSUE_TAGS } from "./model.js";
 
@@ -137,7 +137,7 @@ export async function resolveConflict(
   }
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
   try {
-    await deps.repository.saveProfileAndBase(identity.profile, next, base, () => ensureValid() && canonicalData(deps.data()) === canonicalData(local), deps.signal);
+    await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid, deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
@@ -197,7 +197,15 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
       target.games.push(globalThis.structuredClone(sourceGame));
       return;
     }
-    if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
+    if (item.field === "__membership" || item.field === "identity") {
+      const existingReviewPoints = Array.isArray(game.reviewPoints) ? game.reviewPoints : [];
+      const sourceReviewPoints = Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : [];
+      Object.assign(game, globalThis.structuredClone(sourceGame));
+      game.reviewPoints = [
+        ...sourceReviewPoints,
+        ...existingReviewPoints.filter((point) => !sourceReviewPoints.some((sourcePoint) => sourcePoint.ply === point.ply)),
+      ];
+    }
     else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = cloneValue((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
   }
