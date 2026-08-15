@@ -35,15 +35,16 @@ export async function resolveConflict(
       && current.profile === identity.profile
       && current.generation === identity.generation
       && pending
+      && pending === conflict
       && sameConflictIdentity(identity, pending)
       && pending.rowRevision === conflict.rowRevision);
   };
   const ensureValid = (): boolean => valid();
   const readLocal = (): AppData => globalThis.structuredClone(deps.data());
-  const local = readLocal();
   const latest = await deps.cloud.read(identity.uid);
   if (!ensureValid()) return "aborted";
   if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
+  const local = readLocal();
   const latestCloud = validateCloudPayload(latest.payload);
   if (latest.revision !== conflict.rowRevision) {
     const currentHash = await payloadHash(local);
@@ -93,9 +94,8 @@ export async function resolveConflict(
   if (!ensureValid()) return "aborted";
   deps.setData(next);
   if (!ensureValid()) return "aborted";
-  deps.onResolved();
-  if (!ensureValid()) return "aborted";
   deps.setPending(undefined);
+  deps.onResolved();
   return "resolved";
 }
 
@@ -114,7 +114,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   const sourceGame = source.games.find((candidate) => candidate.id === item.entityId || item.entityId.startsWith(`${candidate.id}:`));
   if (item.entity === "game") {
     if (!sourceGame) {
-      target.games = target.games.filter((candidate) => candidate.id !== gameId);
+      if (item.field === "__membership" || item.field === "identity") target.games = target.games.filter((candidate) => candidate.id !== gameId);
       return;
     }
     if (!game) {
@@ -130,7 +130,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
   const sourcePoint = sourceGame.reviewPoints.find((candidate) => candidate.ply === ply);
   if (!sourcePoint) {
-    game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
+    if (item.field === "__membership" || item.field === "anchor") game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
     return;
   }
   if (!point) {

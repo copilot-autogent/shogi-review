@@ -59,7 +59,7 @@ const autosync = new AutoSyncEngine({
     if (activeUser?.id === uid && activeProfile === profile && profileGeneration === generation && !profileLoadFailed) data = globalThis.structuredClone(next);
   },
   getMetadata: (userId) => readMetadata(userId),
-  setMetadata: (userId, metadata) => { syncMetadata = metadata; writeMetadata(userId, metadata); },
+  setMetadata: async (userId, metadata) => { syncMetadata = metadata; await writeMetadata(userId, metadata); },
   loadBase: (userId) => repo.loadSyncBase(`user:${userId}`),
   saveBase: (userId, base) => repo.saveSyncBase(`user:${userId}`, base),
   cloud: new SupabaseSyncRepository(),
@@ -85,7 +85,7 @@ function readMetadata(userId: string): SyncMetadata {
     return { hashVersion: 1 };
   }
 }
-function writeMetadata(userId: string, value: SyncMetadata): void {
+async function writeMetadata(userId: string, value: SyncMetadata): Promise<void> {
   window.localStorage.setItem(`shogi-review-sync:${userId}`, JSON.stringify(value));
 }
 function pieceName(char: string, promoted: boolean): string {
@@ -296,7 +296,7 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
         const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
         if (current?.uid === uid && pendingConflict?.profile === current.profile && pendingConflict.generation === current.generation) {
           syncMetadata = value;
-          writeMetadata(uid, value);
+          return writeMetadata(uid, value);
         }
       },
       onResolved: () => updateSyncStatus("已同步"),
