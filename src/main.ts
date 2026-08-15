@@ -263,6 +263,11 @@ function renderReview(route: NonNullable<ReturnType<typeof parseReviewRoute>>): 
     reviewState.continuationPly = Math.min(found.game.moves.length, reviewState.continuationPly + 1);
     renderReview(route);
   });
+  document.querySelector("[data-review-close-continuation]")?.addEventListener("click", () => {
+    reviewState.continuationOpen = false;
+    reviewState.displayedPly = found?.point.ply ?? 0;
+    renderReview(route);
+  });
   document.querySelector("[data-review-prev]")?.addEventListener("click", () => navigateReview(-1));
   document.querySelector("[data-review-next]")?.addEventListener("click", () => navigateReview(1));
 }
