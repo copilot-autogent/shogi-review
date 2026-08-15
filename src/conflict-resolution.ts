@@ -10,7 +10,7 @@ export interface ConflictResolutionDependencies {
   setPending: (conflict: PendingConflict | undefined) => void;
   data: () => AppData;
   setData: (data: AppData) => void;
-  repository: Pick<ProfileRepository, "saveProfile" | "saveSyncBase">;
+  repository: Pick<ProfileRepository, "saveProfileAndBase">;
   cloud: SyncRepository;
   metadata: (uid: string, value: SyncSnapshot) => Promise<void> | void;
   onResolved: () => void;
@@ -81,7 +81,12 @@ export async function resolveConflict(
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   const next = globalThis.structuredClone(conflict.mergedData);
-  for (const [index, selected] of Object.entries(choices)) {
+  const selectedChoices = Object.entries(choices).sort(([left], [right]) => {
+    const leftItem = conflict.conflicts[Number(left)];
+    const rightItem = conflict.conflicts[Number(right)];
+    return Number(rightItem?.entity === "review") - Number(leftItem?.entity === "review");
+  });
+  for (const [index, selected] of selectedChoices) {
     const item = conflict.conflicts[Number(index)];
     if (item) applyConflictChoice(next, local, conflict.cloudData, item, selected);
   }
@@ -105,10 +110,8 @@ export async function resolveConflict(
   const afterCasLocalHash = await payloadHash(readLocal());
   if (!ensureValid()) return abort();
   if (afterCasLocalHash !== localHash) return abort();
-  await deps.repository.saveProfile(identity.profile, next);
-  if (!ensureValid()) return abort();
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
-  await deps.repository.saveSyncBase(identity.profile, base);
+  await deps.repository.saveProfileAndBase(identity.profile, next, base);
   if (!ensureValid()) return abort();
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
   await deps.metadata(identity.uid, metadata);
@@ -142,11 +145,7 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
       target.games.push(globalThis.structuredClone(sourceGame));
       return;
     }
-    if (item.field === "__membership" || item.field === "identity") {
-      const reviewPoints = game.reviewPoints;
-      Object.assign(game, globalThis.structuredClone(sourceGame));
-      game.reviewPoints = reviewPoints;
-    }
+    if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
     else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
   }

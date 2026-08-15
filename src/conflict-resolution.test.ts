@@ -39,8 +39,7 @@ function harness(overrides: Partial<ConflictResolutionDependencies> = {}) {
       data: () => data,
       setData: (next) => { data = next; writes.push("data"); },
       repository: {
-        saveProfile: async (profile: string) => { writes.push(`profile:${profile}`); },
-        saveSyncBase: async (profile: string) => { writes.push(`base:${profile}`); },
+        saveProfileAndBase: async (profile: string) => { writes.push(`profile-base:${profile}`); },
       },
       cloud: {
         read: async () => saved,
@@ -64,7 +63,7 @@ describe("identity-scoped conflict resolution", () => {
     const localHash = await hashEmpty();
     state.deps.setPending({ ...state.deps.pending()!, localHash });
     expect(await resolveConflict({}, state.deps)).toBe("resolved");
-    expect(state.writes).toEqual(["profile:user:old", "base:user:old", "metadata", "data", "resolved"]);
+    expect(state.writes).toEqual(["profile-base:user:old", "metadata", "data", "resolved"]);
   });
 
   it("abandons before any write when logout races the cloud read", async () => {
@@ -109,7 +108,7 @@ describe("identity-scoped conflict resolution", () => {
   });
 
   it("stops the remaining commits when identity changes at each durable boundary", async () => {
-    for (const boundary of ["profile", "base", "metadata"] as const) {
+    for (const boundary of ["profile-base", "metadata"] as const) {
       const state = harness();
       state.start();
       state.deps.setPending({ ...state.deps.pending()!, localHash: await hashEmpty() });
@@ -117,13 +116,13 @@ describe("identity-scoped conflict resolution", () => {
         state.deps.metadata = async () => { state.writes.push("metadata"); state.setIdentity(null); };
       } else {
         const repository = state.deps.repository;
-        repository[boundary === "profile" ? "saveProfile" : "saveSyncBase"] = async (profile: string) => {
+        repository.saveProfileAndBase = async (profile: string) => {
           state.writes.push(`${boundary}:${profile}`);
           state.setIdentity(null);
         };
       }
       expect(await resolveConflict({}, state.deps)).toBe("aborted");
-      expect(state.writes).not.toContain(boundary === "profile" ? "base:user:old" : "data");
+      expect(state.writes).not.toContain("data");
     }
   });
 });

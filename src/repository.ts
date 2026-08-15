@@ -16,6 +16,7 @@ export interface ProfileRepository {
   deleteProfile(profile: ProfileKey): Promise<void>;
   loadSyncBase(profile: ProfileKey): Promise<SyncBaseRecord | null>;
   saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void>;
+  saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord): Promise<void>;
   deleteSyncBase(profile: ProfileKey): Promise<void>;
 }
 const empty: AppData = { games: [] };
@@ -49,6 +50,10 @@ export class MemoryProfileRepository implements ProfileRepository {
     return base ? globalThis.structuredClone(base) : null;
   }
   async saveSyncBase(profile: ProfileKey, base: SyncBaseRecord): Promise<void> { this.bases.set(profile, globalThis.structuredClone(base)); }
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord): Promise<void> {
+    this.profiles.set(profile, globalThis.structuredClone(data));
+    this.bases.set(profile, globalThis.structuredClone(base));
+  }
   async deleteSyncBase(profile: ProfileKey): Promise<void> { this.bases.delete(profile); }
 }
 
@@ -155,6 +160,17 @@ export class IndexedDbRepository implements Repository {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("儲存同步基準失敗。"));
       transaction.onabort = () => reject(transaction.error ?? new Error("同步基準交易已取消。"));
+    });
+  }
+  async saveProfileAndBase(profile: ProfileKey, data: AppData, base: SyncBaseRecord): Promise<void> {
+    const db = await this.dbPromise;
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
+      transaction.objectStore("profiles").put(createBackup(data), profile);
+      transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("本機同步資料儲存失敗。"));
+      transaction.onabort = () => reject(transaction.error ?? new Error("本機同步資料交易已取消。"));
     });
   }
   async deleteSyncBase(profile: ProfileKey): Promise<void> {
