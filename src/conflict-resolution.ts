@@ -121,6 +121,7 @@ export async function resolveConflict(
   const reuseCommittedCloud = conflict.conflicts.length === 0
     && Boolean(conflict.baseData)
     && canonicalData(conflict.baseData!) === canonicalData(conflict.cloudData)
+    && canonicalData(conflict.mergedData) === canonicalData(conflict.cloudData)
     && conflict.rowRevision === latest.revision;
   if (reuseCommittedCloud) {
     saved = latest;
@@ -194,6 +195,7 @@ function sameConflictIdentity(identity: SyncIdentity, conflict: PendingConflict)
 
 async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
+  promise.catch(() => undefined);
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(new Error("同步身分已變更。"));
     signal.addEventListener("abort", onAbort, { once: true });
@@ -257,7 +259,10 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
     game.reviewPoints.sort((left, right) => left.ply - right.ply);
     return;
   }
-  if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourceReviewPoint));
+  if (item.field === "__membership" || item.field === "anchor") {
+    for (const key of Object.keys(point)) delete (point as unknown as Record<string, unknown>)[key];
+    Object.assign(point, globalThis.structuredClone(sourceReviewPoint));
+  }
   else if (item.field.startsWith("issueTags.")) {
     const tag = item.field.slice("issueTags.".length) as IssueTag;
     point.issueTags = (Array.isArray(point.issueTags) ? point.issueTags : []).filter((candidate) => candidate !== tag);

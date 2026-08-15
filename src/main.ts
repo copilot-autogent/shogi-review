@@ -322,6 +322,8 @@ async function removeLocalAccount(): Promise<void> {
     render();
   } catch (error) {
     if (localAccountRemovalToken !== removalToken) throw error;
+    await repo.deleteProfile(`user:${uid}`);
+    await repo.deleteSyncBase(`user:${uid}`);
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
