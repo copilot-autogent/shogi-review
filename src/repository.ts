@@ -169,7 +169,7 @@ export class IndexedDbRepository implements Repository {
       const transaction = db.transaction(["profiles", "syncBases"], "readwrite");
       let settled = false;
       const abort = () => { if (!settled) transaction.abort(); };
-      if (!canCommit() || signal?.aborted) { settled = true; abort(); reject(new Error("同步身分已變更。")); return; }
+      if (!canCommit() || signal?.aborted) { abort(); settled = true; reject(new Error("同步身分已變更。")); return; }
       signal?.addEventListener("abort", abort, { once: true });
       transaction.objectStore("profiles").put(createBackup(data), profile);
       transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
