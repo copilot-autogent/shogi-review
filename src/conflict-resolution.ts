@@ -24,7 +24,10 @@ export async function resolveConflict(
 ): Promise<ConflictResolutionResult> {
   const initialIdentity = deps.identity();
   const initialConflict = deps.pending();
-  if (!initialIdentity || !initialConflict || !sameConflictIdentity(initialIdentity, initialConflict)) return "aborted";
+  if (!initialIdentity || !initialConflict || !sameConflictIdentity(initialIdentity, initialConflict)) {
+    if (initialConflict && deps.pending() === initialConflict) deps.setPending(undefined);
+    return "aborted";
+  }
   const identity = { ...initialIdentity };
   const conflict = initialConflict;
   const valid = (): boolean => {
@@ -40,19 +43,23 @@ export async function resolveConflict(
       && pending.rowRevision === conflict.rowRevision);
   };
   const ensureValid = (): boolean => valid();
+  const abort = (): ConflictResolutionResult => {
+    if (deps.pending() === conflict) deps.setPending(undefined);
+    return "aborted";
+  };
   const readLocal = (): AppData => globalThis.structuredClone(deps.data());
   const latest = await deps.cloud.read(identity.uid);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
   const local = readLocal();
   const latestCloud = validateCloudPayload(latest.payload);
   if (latest.revision !== conflict.rowRevision) {
     const currentHash = await payloadHash(local);
-    if (!ensureValid()) return "aborted";
+    if (!ensureValid()) return abort();
     const refreshed = conflict.baseData
       ? mergeAppData(conflict.baseData, local, latestCloud)
       : { data: local, conflicts: conflict.conflicts };
-    if (!ensureValid()) return "aborted";
+    if (!ensureValid()) return abort();
     deps.setPending({
       ...conflict,
       rowRevision: latest.revision,
@@ -64,12 +71,12 @@ export async function resolveConflict(
     throw new Error("雲端已更新，請重新確認目前資料。");
   }
   const localHash = await payloadHash(local);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   if (localHash !== conflict.localHash) {
     const refreshed = conflict.baseData
       ? mergeAppData(conflict.baseData, local, conflict.cloudData)
       : { data: local, conflicts: conflict.conflicts };
-    if (!ensureValid()) return "aborted";
+    if (!ensureValid()) return abort();
     deps.setPending({ ...conflict, localHash, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
   }
@@ -79,21 +86,21 @@ export async function resolveConflict(
     if (item) applyConflictChoice(next, local, conflict.cloudData, item, selected);
   }
   const nextHash = await payloadHash(next);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   const saved = await deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next));
   // CAS may win immediately before logout; the post-CAS guard prevents that result
   // from crossing into the next profile's local, base, metadata, or UI state.
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   await deps.repository.saveProfile(identity.profile, next);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
   await deps.repository.saveSyncBase(identity.profile, base);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
   await deps.metadata(identity.uid, metadata);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   deps.setData(next);
-  if (!ensureValid()) return "aborted";
+  if (!ensureValid()) return abort();
   deps.setPending(undefined);
   deps.onResolved();
   return "resolved";

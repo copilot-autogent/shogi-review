@@ -50,7 +50,7 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 const autosync = new AutoSyncEngine({
-  identity: () => activeUser && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  identity: () => activeUser && !profileLoadFailed && conflictBelongsToCurrentProfile() && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
   save: async (next) => {
     const profile = activeProfile; const uid = activeUser?.id; const generation = profileGeneration;
@@ -279,7 +279,17 @@ function openRestoreDialog(restored: AppData): void { dialogReturnFocus = docume
 async function startGoogleLoginFromUi(): Promise<void> { try { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } } catch (error) { syncMessage = error instanceof Error ? error.message : "Google 登入啟動失敗，請重試。"; render(); } }
 async function removeLocalAccount(): Promise<void> { if (!activeUser) return; if (syncStatus === "同步中") throw new Error("同步完成前不能移除此裝置資料。"); const uid = activeUser.id; profileGeneration += 1; autosync.invalidate(); const { error } = await supabase.auth.signOut(); if (error) throw new Error(`登出失敗：${error.message}`); await repo.deleteProfile(`user:${uid}`); await repo.deleteSyncBase(`user:${uid}`); activeUser = null; activeProfile = "guest"; await activateProfile("guest"); updateSyncStatus("僅本機"); }
 async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; await activateProfile(`user:${pending.uid}`); closeDialog(); render(); void autosync.reconcile(); }
-async function syncNow(): Promise<void> { if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; } await autosync.reconcile(); }
+function conflictBelongsToCurrentProfile(): boolean {
+  return !pendingConflict || Boolean(activeUser
+    && pendingConflict.userId === activeUser.id
+    && pendingConflict.profile === activeProfile
+    && pendingConflict.generation === profileGeneration);
+}
+async function syncNow(): Promise<void> {
+  if (pendingConflict && !conflictBelongsToCurrentProfile()) pendingConflict = undefined;
+  if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; }
+  await autosync.reconcile();
+}
 async function resolveConflict(choices: Record<string, "cloud" | "local">): Promise<void> {
   if (conflictResolutionRunning) return;
   conflictResolutionRunning = true;
