@@ -2,8 +2,8 @@ import { createBackup, parseBackup } from "./backup.js";
 import { detectFormat, decodeRecordBytes, parseGame, type InputFormat } from "./parser.js";
 import { ISSUE_TAGS, PERSPECTIVES, REASONS, type AppData, type Game, type IssueTag, type Perspective, type Reason, type ReviewPoint } from "./model.js";
 import { IndexedDbRepository, MemoryProfileRepository, type ProfileKey, type ProfileRepository } from "./repository.js";
-import { mergeAppData, type MergeConflict } from "./merge.js";
-import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, payloadHash, startGoogleLogin, supabase, SupabaseSyncRepository, validateCloudPayload, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { AutoSyncEngine, currentUser, downloadKifu, finishPkceCallback, googleRedirectUrl, startGoogleLogin, supabase, SupabaseSyncRepository, type PendingConflict, type SyncMetadata, type SyncStatus } from "./sync.js";
+import { resolveConflict as resolveConflictSafely } from "./conflict-resolution.js";
 import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import "./style.css";
@@ -23,8 +23,9 @@ let renderedRoute = "";
 let syncStatus: SyncStatus = "僅本機";
 let syncMessage = "";
 let syncMetadata: SyncMetadata = { hashVersion: 1 };
-let pendingConflict: { userId: string; rowRevision: number; localHash: string; baseData?: AppData; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] } | undefined;
+let pendingConflict: PendingConflict | undefined;
 let dialogBusy = false;
+let conflictResolutionRunning = false;
 let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
 let pendingGuestImport: { uid: string; guest: AppData } | undefined;
@@ -280,83 +281,30 @@ async function removeLocalAccount(): Promise<void> { if (!activeUser) return; if
 async function copyGuestData(): Promise<void> { const pending = pendingGuestImport; if (!pending || activeUser?.id !== pending.uid) return; await repo.saveProfile(`user:${pending.uid}`, pending.guest); pendingGuestImport = undefined; await activateProfile(`user:${pending.uid}`); closeDialog(); render(); void autosync.reconcile(); }
 async function syncNow(): Promise<void> { if (!activeUser || profileLoadFailed || pendingConflict) { if (pendingConflict) openDestructive("conflict"); return; } await autosync.reconcile(); }
 async function resolveConflict(choices: Record<string, "cloud" | "local">): Promise<void> {
-  if (!pendingConflict || !activeUser) return;
-  const conflict = pendingConflict;
-  const latest = await new SupabaseSyncRepository().read(conflict.userId);
-  if (!latest) throw new Error("雲端資料已不存在，未覆蓋本機資料。");
-  if (latest.revision !== conflict.rowRevision) {
-    const parsed = validateCloudPayload(latest.payload);
-    const refreshed = conflict.baseData
-      ? mergeAppData(conflict.baseData, data, parsed)
-      : { data, conflicts: conflict.conflicts };
-    pendingConflict = {
-      ...conflict,
-      rowRevision: latest.revision,
-      localHash: await payloadHash(data),
-      cloudData: parsed,
-      mergedData: refreshed.data,
-      conflicts: refreshed.conflicts,
-    };
-    throw new Error("雲端已更新，請重新確認目前資料。");
+  if (conflictResolutionRunning) return;
+  conflictResolutionRunning = true;
+  try {
+    const result = await resolveConflictSafely(choices, {
+      identity: () => activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+      pending: () => pendingConflict,
+      setPending: (next) => { pendingConflict = next; },
+      data: () => data,
+      setData: (next) => { data = globalThis.structuredClone(next); },
+      repository: repo,
+      cloud: new SupabaseSyncRepository(),
+      metadata: (uid, value) => {
+        const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        if (current?.uid === uid && pendingConflict?.profile === current.profile && pendingConflict.generation === current.generation) {
+          syncMetadata = value;
+          writeMetadata(uid, value);
+        }
+      },
+      onResolved: () => updateSyncStatus("已同步"),
+    });
+    if (result === "aborted") return;
+  } finally {
+    conflictResolutionRunning = false;
   }
-  if (await payloadHash(data) !== conflict.localHash) {
-    const refreshed = conflict.baseData
-      ? mergeAppData(conflict.baseData, data, conflict.cloudData)
-      : { data, conflicts: conflict.conflicts };
-    pendingConflict = { ...conflict, localHash: await payloadHash(data), mergedData: refreshed.data, conflicts: refreshed.conflicts };
-    throw new Error("本機資料已更新，請重新確認目前資料。");
-  }
-  const next = globalThis.structuredClone(conflict.mergedData);
-  for (const [index, selected] of Object.entries(choices)) {
-    const item = conflict.conflicts[Number(index)];
-    if (item) applyConflictChoice(next, data, conflict.cloudData, item, selected);
-  }
-  const nextHash = await payloadHash(next);
-  const saved = await new SupabaseSyncRepository().casUpdate(conflict.userId, latest.revision, createBackup(next));
-  await repo.saveProfile(activeProfile, next);
-  data = next;
-  await repo.saveSyncBase(activeProfile, { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 });
-  syncMetadata = { ownerUid: conflict.userId, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
-  pendingConflict = undefined; updateSyncStatus("已同步");
-}
-function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, item: MergeConflict, selected: "local" | "cloud"): void {
-  const source = selected === "local" ? local : cloud;
-  if (item.entityId === "*") { target.games = globalThis.structuredClone(source.games); return; }
-  const gameId = item.entity === "review" ? item.entityId.slice(0, item.entityId.lastIndexOf(":")) : item.entityId;
-  const game = target.games.find((candidate) => candidate.id === gameId);
-  const sourceGame = source.games.find((candidate) => candidate.id === item.entityId || item.entityId.startsWith(`${candidate.id}:`));
-  if (item.entity === "game") {
-    if (!sourceGame) {
-      target.games = target.games.filter((candidate) => candidate.id !== gameId);
-      return;
-    }
-    if (!game) {
-      target.games.push(globalThis.structuredClone(sourceGame));
-      return;
-    }
-    if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
-    else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourceGame as unknown as Record<string, unknown>)[item.field]);
-    return;
-  }
-  if (!game || !sourceGame) return;
-  const ply = Number(item.entityId.split(":").at(-1));
-  const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
-  const sourcePoint = sourceGame.reviewPoints.find((candidate) => candidate.ply === ply);
-  if (!sourcePoint) {
-    game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);
-    return;
-  }
-  if (!point) {
-    game.reviewPoints.push(globalThis.structuredClone(sourcePoint));
-    return;
-  }
-  if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourcePoint));
-  else if (item.field.startsWith("issueTags.")) {
-    const tag = item.field.slice("issueTags.".length) as IssueTag;
-    point.issueTags = point.issueTags.filter((candidate) => candidate !== tag);
-    if (sourcePoint.issueTags.includes(tag)) point.issueTags.push(tag);
-    point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
-  } else (point as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourcePoint as unknown as Record<string, unknown>)[item.field]);
 }
 function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
 async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> { const guest = await repo.loadProfile("guest"); const account = await repo.loadProfile(`user:${uid}`); if (isCurrent() && guest.data.games.length && !account.data.games.length) { pendingGuestImport = { uid, guest: guest.data }; openGuestImportDialog(uid, guest.data, account.data); } }
