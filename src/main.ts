@@ -493,8 +493,8 @@ async function removeLocalAccount(): Promise<void> {
   }
 }
 function currentIdentity(): { uid: string; profile: ProfileKey; generation: number } | null {
-  return activeUser && !profileTransition && !profileLoadFailed
-    ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration }
+  return !profileTransition && !profileLoadFailed
+    ? { uid: activeUser?.id ?? "guest", profile: activeProfile, generation: profileGeneration }
     : null;
 }
 function assertWritable(): void {
