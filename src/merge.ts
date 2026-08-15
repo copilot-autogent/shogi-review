@@ -71,6 +71,8 @@ function validRepresentation(game: Game): boolean {
   return Boolean(game.canonicalHash && game.initialSfen && game.sfens.length === game.moves.length + 1 && game.sfens[0] === game.initialSfen);
 }
 function sameIdentity(a: Game, b: Game): boolean {
+  // Source metadata is a representation; when an ancestor exists, its representation
+  // remains authoritative even if both devices re-import the same identity.
   return a.canonicalHash === b.canonicalHash && a.initialSfen === b.initialSfen
     && stable(a.sfens) === stable(b.sfens) && stable(a.moves) === stable(b.moves);
 }

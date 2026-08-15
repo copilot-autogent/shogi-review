@@ -165,6 +165,10 @@ export class AutoSyncEngine {
     const metadata = this.options.getMetadata(identity.uid);
     const base = this.options.loadBase ? await this.options.loadBase(identity.uid) : null;
     if (!this.valid(identity)) return "aborted";
+    if (base) {
+      if (base.hashVersion !== HASH_VERSION || await payloadHash(base.data) !== base.payloadHash) throw new Error("同步基準驗證失敗，未套用任何變更。");
+      if (!this.valid(identity)) return "aborted";
+    }
     const baseline = Boolean(base) || (metadata.ownerUid === identity.uid && metadata.lastSyncedRevision !== undefined && metadata.lastSyncedPayloadHash !== undefined);
     const row = await this.options.cloud.read(identity.uid);
     if (!this.valid(identity)) return "aborted";
@@ -176,13 +180,23 @@ export class AutoSyncEngine {
     }
     if (!row || !cloudData || !cloudHash) {
       if (local.games.length === 0) {
-        const saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1);
+        let saved: CloudState;
+        try { saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1); }
+        catch {
+          if (retries >= 1) return "aborted";
+          return this.run(identity, retries + 1);
+        }
         if (!this.valid(identity)) return "aborted";
         if (!await this.saveBase(identity, local, saved.revision, localHash, saved.updated_at)) return "aborted";
         return "synced";
       }
       if (baseline) return "aborted";
-      const saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1);
+      let saved: CloudState;
+      try { saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1); }
+      catch {
+        if (retries >= 1) return "aborted";
+        return this.run(identity, retries + 1);
+      }
       if (!this.valid(identity)) return "aborted";
       if (!await this.saveBase(identity, local, saved.revision, localHash, saved.updated_at)) return "aborted";
       return "synced";
@@ -240,6 +254,12 @@ export class AutoSyncEngine {
       return this.run(identity, retries + 1);
     }
     if (!this.valid(identity)) return "aborted";
+    const latestLocalHash = await this.currentHash();
+    if (!this.valid(identity)) return "aborted";
+    if (latestLocalHash !== localHash) {
+      this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
+      return "conflict";
+    }
     if (mergedHash !== localHash) await this.options.save(merged.data);
     if (!this.valid(identity)) return "aborted";
     if (!await this.saveBase(identity, merged.data, saved.revision, mergedHash, saved.updated_at)) return "aborted";
