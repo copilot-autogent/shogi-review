@@ -5,6 +5,12 @@ export type IssueTag = (typeof ISSUE_TAGS)[number];
 export const PERSPECTIVES = ["sente", "gote", "spectator"] as const;
 export type Perspective = (typeof PERSPECTIVES)[number];
 
+export interface RecommendedMove {
+  id: string;
+  move: string;
+  comment?: string;
+}
+
 export interface ReviewPoint {
   id: string;
   ply: number;
@@ -14,6 +20,7 @@ export interface ReviewPoint {
   note?: string;
   externalNotes?: string;
   legacyNotes?: string;
+  recommendedMoves?: RecommendedMove[];
   createdAt: string;
 }
 

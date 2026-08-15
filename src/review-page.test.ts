@@ -54,6 +54,20 @@ describe("dedicated review page seam", () => {
     expect(laterContinuation).toContain("#/game/a?ply=4");
   });
 
+  it("keeps recommendation text and metadata out of the DOM until reveal", () => {
+    const item = game("a", "2026-01-01", ["p"]);
+    item.reviewPoints[0]!.recommendedMoves = [{ id: "rec-1", move: "<script>alert(1)</script>", comment: "comment & text" }];
+    const route = parseReviewRoute(reviewRoute("a", "p"))!;
+    const hidden = renderReviewPage(buildReviewViewModel({ games: [item] }, route, state()));
+    expect(hidden).not.toContain("推薦手");
+    expect(hidden).not.toContain("rec-1");
+    expect(hidden).not.toContain("comment");
+    const revealed = renderReviewPage(buildReviewViewModel({ games: [item] }, route, state({ revealed: true })));
+    expect(revealed).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(revealed).toContain("comment &amp; text");
+    expect(revealed).not.toContain("<script>alert(1)</script>");
+  });
+
   it("separates history, anchor, and continuation phases at game boundaries", () => {
     const data: AppData = { games: [game("a", "2026-01-01", ["start", "middle", "end"], [0, 3, 6])] };
     const make = (pointId: string, overrides: Partial<Parameters<typeof buildReviewViewModel>[2]>) => buildReviewViewModel(

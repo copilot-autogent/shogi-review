@@ -281,7 +281,7 @@ async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
   });
 }
 
-function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, item: MergeConflict, selected: "local" | "cloud"): void {
+export function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, item: MergeConflict, selected: "local" | "cloud"): void {
   const source = selected === "local" ? local : cloud;
   if (item.entityId === "*") {
     target.games = globalThis.structuredClone(source.games);
@@ -337,6 +337,25 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
     point.issueTags = (Array.isArray(point.issueTags) ? point.issueTags : []).filter((candidate) => candidate !== tag);
     if (Array.isArray(sourceReviewPoint.issueTags) && sourceReviewPoint.issueTags.includes(tag)) point.issueTags.push(tag);
     point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
+  }   else if (item.field.startsWith("recommendedMoves.")) {
+    const [, recommendationId, field] = item.field.split(".");
+    const target = point.recommendedMoves ?? [];
+    const sourceRecommendations = sourceReviewPoint.recommendedMoves ?? [];
+    const sourceRecommendation = sourceRecommendations.find((candidate) => candidate.id === recommendationId);
+    const targetIndex = target.findIndex((candidate) => candidate.id === recommendationId);
+    if (field === "__membership") {
+      if (!sourceRecommendation) point.recommendedMoves = target.filter((candidate) => candidate.id !== recommendationId);
+      else if (targetIndex < 0) point.recommendedMoves = [...target, globalThis.structuredClone(sourceRecommendation)];
+      else {
+        const recommendations = [...target];
+        recommendations[targetIndex] = globalThis.structuredClone(sourceRecommendation);
+        point.recommendedMoves = recommendations;
+      }
+    } else if (sourceRecommendation) {
+      if (targetIndex < 0) point.recommendedMoves = [...target, globalThis.structuredClone(sourceRecommendation)];
+      else (point.recommendedMoves![targetIndex] as unknown as Record<string, unknown>)[field] = cloneValue((sourceRecommendation as unknown as Record<string, unknown>)[field]);
+    }
+    if (!point.recommendedMoves?.length) delete point.recommendedMoves;
   } else {
     const sourceValue = (sourceReviewPoint as unknown as Record<string, unknown>)[item.field];
     (point as unknown as Record<string, unknown>)[item.field] = cloneValue(sourceValue);

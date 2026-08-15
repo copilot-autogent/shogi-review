@@ -140,7 +140,10 @@ function board(sfen: string, orientation: BoardOrientation): string {
 }
 
 function answer(point: ReviewPoint): string {
-  return `<section id="review-answer" tabindex="-1"><h2>揭示的記錄</h2><p><strong>原因：</strong>${escapeReviewHtml(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(escapeReviewHtml).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次要注意什麼：</strong>${escapeReviewHtml(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${escapeReviewHtml(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${escapeReviewHtml(point.legacyNotes)}</p></details>` : ""}</section>`;
+  const recommendations = point.recommendedMoves?.length
+    ? `<section class="recommendations"><h3>推薦手</h3><ol>${point.recommendedMoves.map((item) => `<li><strong>${escapeReviewHtml(item.move)}</strong>${item.comment ? `<p>${escapeReviewHtml(item.comment)}</p>` : ""}</li>`).join("")}</ol></section>`
+    : "";
+  return `<section id="review-answer" tabindex="-1"><h2>揭示的記錄</h2><p><strong>原因：</strong>${escapeReviewHtml(point.reason)}</p><p><strong>問題：</strong>${point.issueTags.length ? point.issueTags.map(escapeReviewHtml).join("、") : "未標記"}</p>${point.note ? `<p><strong>下次要注意什麼：</strong>${escapeReviewHtml(point.note)}</p>` : ""}${point.externalNotes ? `<p><strong>外部分析：</strong>${escapeReviewHtml(point.externalNotes)}</p>` : ""}${point.legacyNotes ? `<details><summary>舊版筆記</summary><p>${escapeReviewHtml(point.legacyNotes)}</p></details>` : ""}${recommendations}</section>`;
 }
 
 export function renderReviewPage(vm: ReviewViewModel): string {

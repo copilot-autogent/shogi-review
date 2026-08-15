@@ -2,6 +2,7 @@ import type { AppData, Game, IssueTag, Perspective, Reason, ReviewPoint } from "
 import { CATEGORY_MIGRATION, ISSUE_TAGS, PERSPECTIVES, REASONS } from "./model.js";
 import { Position } from "tsshogi";
 import { parseGame } from "./parser.js";
+import { normalizeRecommendedMoves } from "./recommendations.js";
 
 export interface Backup { schemaVersion: 3; exportedAt: string; data: AppData; }
 type RecordValue = Record<string, unknown>;
@@ -23,7 +24,15 @@ export function parseBackup(input: string): AppData {
 
 export function migrateData(value: unknown, version: number): AppData {
   if (!isRecord(value) || !Array.isArray(value.games)) throw new Error("備份資料結構不完整，未套用任何變更。");
-  if (version === 3) return value as unknown as AppData;
+  if (version === 3) {
+    const data = globalThis.structuredClone(value) as unknown as AppData;
+    for (const game of data.games) for (const point of game.reviewPoints) {
+      const recommendations = normalizeRecommendedMoves(point.recommendedMoves);
+      if (recommendations === undefined) delete point.recommendedMoves;
+      else point.recommendedMoves = recommendations;
+    }
+    return data;
+  }
   return { games: value.games.map((raw) => migrateGame(raw)) };
 }
 
@@ -59,14 +68,16 @@ function migratePoint(raw: unknown): ReviewPoint {
   const tags = Array.isArray(raw.issueTags) ? raw.issueTags.filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)) : [];
   if (mapped.tag && !tags.includes(mapped.tag)) tags.push(mapped.tag);
   const note = typeof raw.note === "string" && raw.note.trim() ? raw.note : (typeof raw.nextConsideration === "string" && raw.nextConsideration.trim() ? raw.nextConsideration : undefined);
+  const recommendedMoves = normalizeRecommendedMoves(raw.recommendedMoves);
   return {
     id: string(raw.id), ply: number(raw.ply), sfen: string(raw.sfen), reason, issueTags: tags,
     note, externalNotes: text(raw.externalNotes), legacyNotes: legacy.length ? legacy.join("\n") : text(raw.legacyNotes),
     createdAt: string(raw.createdAt),
+    ...(recommendedMoves ? { recommendedMoves } : {}),
   };
 }
 
-function validateData(data: AppData): void {
+export function validateData(data: AppData): void {
   if (!isRecord(data) || !Array.isArray(data.games)) throw new Error("備份資料結構不完整，未套用任何變更。");
   const ids = new Set<string>();
   const pointIds = new Set<string>();
@@ -94,6 +105,7 @@ function validateData(data: AppData): void {
         (typeof point.note !== "undefined" && typeof point.note !== "string") ||
         (typeof point.externalNotes !== "undefined" && typeof point.externalNotes !== "string") ||
         (typeof point.legacyNotes !== "undefined" && typeof point.legacyNotes !== "string") ||
+        (() => { try { normalizeRecommendedMoves(point.recommendedMoves); return false; } catch { return true; } })() ||
         typeof point.createdAt !== "string") {
         throw new Error("備份含有無效複盤欄位，未套用任何變更。");
       }
