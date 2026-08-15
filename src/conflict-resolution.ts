@@ -87,7 +87,7 @@ export async function resolveConflict(
   if (localHash !== conflict.localHash) {
     const refreshed = conflict.baseData
       ? mergeAppData(conflict.baseData, local, conflict.cloudData)
-      : { data: local, conflicts: conflict.conflicts };
+    : { data: local, conflicts: conflict.conflicts.map((item) => ({ ...item, local, cloud: conflict.cloudData })) };
     if (!ensureValid()) return abort();
     deps.setPending({ ...conflict, localHash, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");

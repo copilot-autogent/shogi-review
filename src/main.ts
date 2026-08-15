@@ -29,6 +29,7 @@ let conflictResolutionRunning = false;
 let conflictResolutionAbort: AbortController | undefined;
 let removingLocalAccount = false;
 let localAccountRemovalToken: object | undefined;
+let removingLocalAccountUid: string | undefined;
 let backupReady = false;
 let dialogReturnFocus: HTMLElement | null = null;
 let pendingGuestImport: { uid: string; guest: AppData } | undefined;
@@ -296,12 +297,14 @@ async function removeLocalAccount(): Promise<void> {
   conflictResolutionAbort?.abort();
   removingLocalAccount = true;
   localAccountRemovalToken = removalToken;
+  removingLocalAccountUid = uid;
   profileGeneration += 1;
   autosync.invalidate();
   const { error } = await supabase.auth.signOut();
   if (error) {
     removingLocalAccount = false;
     localAccountRemovalToken = undefined;
+    removingLocalAccountUid = undefined;
     activeUser = previousUser;
     activeProfile = previousProfile;
     pendingConflict = previousPending;
@@ -332,6 +335,7 @@ async function removeLocalAccount(): Promise<void> {
     if (localAccountRemovalToken === removalToken) {
       removingLocalAccount = false;
       localAccountRemovalToken = undefined;
+      removingLocalAccountUid = undefined;
     }
   }
 }
@@ -359,7 +363,10 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
       pending: () => pendingConflict,
       setPending: (next) => { pendingConflict = next; },
       data: () => data,
-      setData: (next) => { data = globalThis.structuredClone(next); },
+      setData: (next) => {
+        const current = activeUser && !profileLoadFailed ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null;
+        if (current && capturedPending && current.uid === capturedPending.userId && current.profile === capturedPending.profile && current.generation === capturedPending.generation) data = globalThis.structuredClone(next);
+      },
       repository: repo,
       cloud: new SupabaseSyncRepository(),
       metadata: async (uid, value) => {
@@ -387,4 +394,4 @@ function filterLibrary(): void { const root = document.querySelector("#library")
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
 async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
 void bootstrap();
-supabase.auth.onAuthStateChange((_event, session) => { if (removingLocalAccount && !session?.user) return; if (removingLocalAccount && session?.user) { removingLocalAccount = false; localAccountRemovalToken = undefined; } const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; conflictResolutionAbort?.abort(); pendingConflict = undefined; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
+supabase.auth.onAuthStateChange((_event, session) => { if (removingLocalAccount && !session?.user) return; if (removingLocalAccount && session?.user?.id === removingLocalAccountUid) return; if (removingLocalAccount && session?.user) { removingLocalAccount = false; localAccountRemovalToken = undefined; removingLocalAccountUid = undefined; } const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; conflictResolutionAbort?.abort(); pendingConflict = undefined; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
