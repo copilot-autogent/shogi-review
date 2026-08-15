@@ -1,7 +1,8 @@
 import { createClient, type SupabaseClient, type User } from "@supabase/supabase-js";
 import { createBackup, parseBackup } from "./backup.js";
 import type { AppData } from "./model.js";
-import type { ProfileKey } from "./repository.js";
+import type { ProfileKey, SyncBaseRecord } from "./repository.js";
+import { mergeAppData, type MergeConflict } from "./merge.js";
 
 export const SUPABASE_URL = "https://yuymtghhqszcfbhhhhyq.supabase.co";
 export const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_n2OiqY7tvxchr2rnhObTlA_uGUG7z1E";
@@ -40,9 +41,11 @@ export interface SyncEngineOptions {
   save: (data: AppData) => Promise<void>;
   getMetadata: (uid: string) => SyncSnapshot;
   setMetadata: (uid: string, metadata: SyncSnapshot) => Promise<void> | void;
+  loadBase?: (uid: string) => Promise<SyncBaseRecord | null>;
+  saveBase?: (uid: string, base: SyncBaseRecord) => Promise<void>;
   cloud: SyncRepository;
   onStatus?: (status: SyncStatus, message?: string) => void;
-  onConflict?: (conflict: { userId: string; rowRevision: number; cloudData: AppData }) => void;
+  onConflict?: (conflict: { userId: string; rowRevision: number; cloudData: AppData; mergedData: AppData; conflicts: MergeConflict[] }) => void;
 }
 export type SyncResult = "synced" | "conflict" | "aborted";
 
@@ -147,59 +150,99 @@ export class AutoSyncEngine {
     return !this.disposed && current?.uid === identity.uid && current.profile === identity.profile && current.generation === identity.generation;
   }
   private async currentHash(): Promise<string> { return payloadHash(await this.options.load()); }
-  private async run(identity: SyncIdentity): Promise<SyncResult> {
+  private async saveBase(identity: SyncIdentity, data: AppData, revision: number, hash: string, at?: string): Promise<boolean> {
+    const next = { data, revision, payloadHash: hash, hashVersion: HASH_VERSION };
+    if (this.options.saveBase) await this.options.saveBase(identity.uid, next);
+    if (!this.valid(identity)) return false;
+    await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: revision, lastSyncedPayloadHash: hash, hashVersion: HASH_VERSION, lastSyncedAt: at ?? new Date().toISOString() });
+    return this.valid(identity);
+  }
+  private async run(identity: SyncIdentity, retries = 0): Promise<SyncResult> {
     this.options.onStatus?.("同步中");
     const local = await this.options.load();
     const localHash = await payloadHash(local);
     if (!this.valid(identity)) return "aborted";
     const metadata = this.options.getMetadata(identity.uid);
-    const baseline = metadata.ownerUid === identity.uid && metadata.lastSyncedRevision !== undefined && metadata.lastSyncedPayloadHash !== undefined;
+    const base = this.options.loadBase ? await this.options.loadBase(identity.uid) : null;
+    if (!this.valid(identity)) return "aborted";
+    const baseline = Boolean(base) || (metadata.ownerUid === identity.uid && metadata.lastSyncedRevision !== undefined && metadata.lastSyncedPayloadHash !== undefined);
     const row = await this.options.cloud.read(identity.uid);
     if (!this.valid(identity)) return "aborted";
     const cloudData = row ? validateCloudPayload(row.payload) : null;
     const cloudHash = cloudData ? await payloadHash(cloudData) : undefined;
-    const localChanged = baseline ? localHash !== metadata.lastSyncedPayloadHash : local.games.length > 0;
-    const cloudChanged = baseline ? !row || row.revision !== metadata.lastSyncedRevision || cloudHash !== metadata.lastSyncedPayloadHash : Boolean(row);
-    const decision = decideSync({ baseline, local, cloud: cloudData, localHash, cloudHash, localChanged, cloudChanged });
     if (baseline && !row) {
       this.options.onStatus?.("離線／同步失敗", "雲端資料已不存在；未覆蓋本機資料。");
       return "aborted";
     }
-    if (decision === "conflict") {
-      if (row && cloudData) this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData });
-      this.options.onStatus?.("衝突", "本機與雲端都有資料，請選擇保留哪一份。");
-      return "conflict";
-    }
-    if (decision === "download-cloud" && row && cloudData && cloudHash) {
-      if (await this.currentHash() !== localHash || !this.valid(identity)) {
-        this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
-        return "conflict";
+    if (!row || !cloudData || !cloudHash) {
+      if (local.games.length === 0) {
+        const saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1);
+        if (!this.valid(identity)) return "aborted";
+        if (!await this.saveBase(identity, local, saved.revision, localHash, saved.updated_at)) return "aborted";
+        return "synced";
       }
-      await this.options.save(cloudData);
-      if (!this.valid(identity)) return "aborted";
-      await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: row.revision, lastSyncedPayloadHash: cloudHash, hashVersion: HASH_VERSION, lastSyncedAt: row.updated_at ?? new Date().toISOString() });
-    } else if (decision === "initialize-empty" || decision === "initialize-local") {
+      if (baseline) return "aborted";
       const saved = await this.options.cloud.insert(identity.uid, createCloudPayload(local), 1);
       if (!this.valid(identity)) return "aborted";
-      await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: HASH_VERSION, lastSyncedAt: saved.updated_at ?? new Date().toISOString() });
-    } else if (decision === "push-local" && row) {
-      if (await this.currentHash() !== localHash || !this.valid(identity)) return "aborted";
-      try {
-        const saved = await this.options.cloud.casUpdate(identity.uid, row.revision, createCloudPayload(local));
+      if (!await this.saveBase(identity, local, saved.revision, localHash, saved.updated_at)) return "aborted";
+      return "synced";
+    }
+    if (!base) {
+      if (localHash === cloudHash) {
+        if (!await this.saveBase(identity, local, row.revision, localHash, row.updated_at)) return "aborted";
+        return "synced";
+      }
+      const safeCloudBootstrap = local.games.length === 0
+        && (!metadata.ownerUid || metadata.lastSyncedPayloadHash === cloudHash);
+      if (safeCloudBootstrap) {
+        const current = await this.options.load();
         if (!this.valid(identity)) return "aborted";
-        await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: localHash, hashVersion: HASH_VERSION, lastSyncedAt: saved.updated_at ?? new Date().toISOString() });
-      } catch {
-        const latest = await this.options.cloud.read(identity.uid);
-        const latestData = latest ? validateCloudPayload(latest.payload) : null;
-        const latestHash = latestData ? await payloadHash(latestData) : undefined;
-        if (!latestHash || latestHash !== localHash || !latest || !this.valid(identity)) {
-          if (latest && latestData) this.options.onConflict?.({ userId: identity.uid, rowRevision: latest.revision, cloudData: latestData });
-          this.options.onStatus?.("衝突", "雲端版本已變更，未覆蓋資料。");
+        if (await payloadHash(current) !== localHash) {
+          this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData, mergedData: current, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local: current, cloud: cloudData, reason: "membership" }] });
+          this.options.onStatus?.("衝突", "同步期間本機資料有新變更，未覆蓋本機。");
           return "conflict";
         }
-        await this.options.setMetadata(identity.uid, { ownerUid: identity.uid, lastSyncedRevision: latest.revision, lastSyncedPayloadHash: latestHash, hashVersion: HASH_VERSION, lastSyncedAt: latest.updated_at ?? new Date().toISOString() });
+        await this.options.save(cloudData);
+        if (!this.valid(identity)) return "aborted";
+        if (!await this.saveBase(identity, cloudData, row.revision, cloudHash, row.updated_at)) return "aborted";
+        return "synced";
       }
+      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData, mergedData: local, conflicts: [{ entity: "game", entityId: "*", field: "*", path: "library", base: undefined, local, cloud: cloudData, reason: "membership" }] });
+      this.options.onStatus?.("衝突", "首次同步需要確認本機與雲端資料。");
+      return "conflict";
     }
+    const merged = mergeAppData(base.data, local, cloudData);
+    if (merged.conflicts.length) {
+      this.options.onConflict?.({ userId: identity.uid, rowRevision: row.revision, cloudData, mergedData: merged.data, conflicts: merged.conflicts });
+      this.options.onStatus?.("衝突", "只有相同棋局、局面或欄位需要選擇；其他變更已預覽合併。");
+      return "conflict";
+    }
+    const mergedHash = await payloadHash(merged.data);
+    if (!this.valid(identity)) return "aborted";
+    if (mergedHash === localHash && mergedHash === cloudHash) {
+      if (base.revision !== row.revision || base.payloadHash !== mergedHash) {
+        if (!await this.saveBase(identity, merged.data, row.revision, mergedHash, row.updated_at)) return "aborted";
+      }
+      return "synced";
+    }
+    if (await this.currentHash() !== localHash || !this.valid(identity)) return "aborted";
+    let saved = row;
+    try {
+      if (mergedHash !== cloudHash) saved = await this.options.cloud.casUpdate(identity.uid, row.revision, createCloudPayload(merged.data));
+    } catch {
+      if (retries >= 1) {
+        this.options.onStatus?.("離線／同步失敗", "雲端持續變更，已停止重試；請稍後再同步。");
+        return "aborted";
+      }
+      const latest = await this.options.cloud.read(identity.uid);
+      if (!this.valid(identity)) return "aborted";
+      if (!latest) return "aborted";
+      return this.run(identity, retries + 1);
+    }
+    if (!this.valid(identity)) return "aborted";
+    if (mergedHash !== localHash) await this.options.save(merged.data);
+    if (!this.valid(identity)) return "aborted";
+    if (!await this.saveBase(identity, merged.data, saved.revision, mergedHash, saved.updated_at)) return "aborted";
     if (!this.valid(identity)) return "aborted";
     this.options.onStatus?.("已同步");
     return "synced";
