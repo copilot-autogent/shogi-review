@@ -81,16 +81,15 @@ test("import, game, review reveal and continuation stay usable on a phone", asyn
   await page.locator("[data-review-continuation]").click();
   await expect(page.locator(".continuation")).toBeVisible();
   await assertContained(page);
-  const nav = page.locator(".review-navigation");
-  await nav.scrollIntoViewIfNeeded();
-  const overlap = await page.evaluate(() => {
-    const nav = document.querySelector<HTMLElement>(".review-navigation")!.getBoundingClientRect();
-    return Array.from(document.querySelectorAll<HTMLElement>("#review-answer, .continuation button, .continuation a")).some((element) => {
+  for (const target of await page.locator(".continuation button, .continuation a").all()) {
+    await target.scrollIntoViewIfNeeded();
+    const overlap = await target.evaluate((element) => {
+      const nav = document.querySelector<HTMLElement>(".review-navigation")!.getBoundingClientRect();
       const box = element.getBoundingClientRect();
       return box.bottom > nav.top && box.top < nav.bottom && box.right > nav.left && box.left < nav.right;
     });
-  });
-  expect(overlap).toBe(false);
+    expect(overlap).toBe(false);
+  }
 });
 
 test("rename dialog follows kind focus policy, traps focus, and survives 200% zoom", async ({ page }) => {
