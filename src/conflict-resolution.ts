@@ -1,6 +1,6 @@
 import type { AppData, IssueTag } from "./model.js";
 import { mergeAppData, type MergeConflict } from "./merge.js";
-import { createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
+import { canonicalData, createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
 import type { ProfileRepository, SyncBaseRecord } from "./repository.js";
 import { ISSUE_TAGS } from "./model.js";
 
@@ -52,7 +52,7 @@ export async function resolveConflict(
   const readLocal = (): AppData => globalThis.structuredClone(deps.data());
   let latest: Awaited<ReturnType<SyncRepository["read"]>>;
   try {
-    latest = await deps.cloud.read(identity.uid);
+    latest = await withAbort(deps.cloud.read(identity.uid), deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
@@ -116,7 +116,7 @@ export async function resolveConflict(
   }
   let saved: Awaited<ReturnType<SyncRepository["casUpdate"]>>;
   try {
-    saved = await deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next));
+    saved = await withAbort(deps.cloud.casUpdate(identity.uid, latest.revision, createCloudPayload(next)), deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
@@ -137,7 +137,7 @@ export async function resolveConflict(
   }
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
   try {
-    await deps.repository.saveProfileAndBase(identity.profile, next, base, ensureValid, deps.signal);
+    await deps.repository.saveProfileAndBase(identity.profile, next, base, () => ensureValid() && canonicalData(deps.data()) === canonicalData(local), deps.signal);
   } catch (error) {
     if (!ensureValid()) return abort();
     throw error;
@@ -160,6 +160,19 @@ export async function resolveConflict(
 
 function sameConflictIdentity(identity: SyncIdentity, conflict: PendingConflict): boolean {
   return conflict.userId === identity.uid && conflict.profile === identity.profile && conflict.generation === identity.generation;
+}
+
+async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw new Error("同步身分已變更。");
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("同步身分已變更。"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", onAbort); reject(error); },
+    );
+  });
 }
 
 function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, item: MergeConflict, selected: "local" | "cloud"): void {
@@ -186,7 +199,8 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   }
   if (!game || !sourceGame) return;
   const ply = Number(item.entityId.split(":").at(-1));
-  const point = (Array.isArray(game.reviewPoints) ? game.reviewPoints : []).find((candidate) => candidate.ply === ply);
+  if (!Array.isArray(game.reviewPoints)) game.reviewPoints = [];
+  const point = game.reviewPoints.find((candidate) => candidate.ply === ply);
   const sourcePoint = (Array.isArray(sourceGame.reviewPoints) ? sourceGame.reviewPoints : []).find((candidate) => candidate.ply === ply);
   if (!sourcePoint) {
     if (item.field === "__membership" || item.field === "anchor") game.reviewPoints = game.reviewPoints.filter((candidate) => candidate.ply !== ply);

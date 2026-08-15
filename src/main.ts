@@ -262,12 +262,12 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
   } catch (error) {
     dialogBusy = false;
     if (submit) submit.disabled = false;
-    showError(error);
     if (kind === "conflict") {
       closeDialog();
       render();
       if (pendingConflict) openDestructive("conflict");
-    }
+    } 
+    showError(error);
   }
 }
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
@@ -296,7 +296,7 @@ async function syncNow(): Promise<void> {
   await autosync.reconcile();
 }
 async function resolveConflict(choices: Record<string, "cloud" | "local">): Promise<void> {
-  if (conflictResolutionRunning) return;
+  if (conflictResolutionRunning) throw new Error("衝突處理正在進行中。");
   conflictResolutionRunning = true;
   const abortController = new AbortController();
   conflictResolutionAbort = abortController;
@@ -332,4 +332,4 @@ function filterLibrary(): void { const root = document.querySelector("#library")
 window.addEventListener("hashchange", () => { if (location.hash === "#/import") { location.hash = "#/"; setTimeout(() => document.querySelector<HTMLDetailsElement>("#import-panel")?.setAttribute("open", ""), 0); } else render(); });
 async function bootstrap(): Promise<void> { const callbackError = await finishPkceCallback(); if (callbackError) startupError = callbackError; try { const user = await currentUser(); if (user) { activeUser = user; activeProfile = `user:${user.id}`; await activateProfile(activeProfile); } else await activateProfile("guest"); } catch (error) { startupError = `${error instanceof Error ? error.message : "本機資料格式無效。"} 未套用變更。`; profileLoadFailed = true; data = { games: [] }; updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。"); } render(); if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); } }
 void bootstrap();
-supabase.auth.onAuthStateChange((_event, session) => { const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; conflictResolutionAbort?.abort(); autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });
+supabase.auth.onAuthStateChange((_event, session) => { const next = session?.user; if (next?.id === activeUser?.id || (!next && !activeUser)) return; const transition = profileGeneration + 1; conflictResolutionAbort?.abort(); pendingConflict = undefined; autosync.invalidate(); void (async () => { try { activeUser = next ? { id: next.id, email: next.email, user_metadata: next.user_metadata } : null; activeProfile = next ? `user:${next.id}` : "guest"; await activateProfile(activeProfile); if (profileGeneration !== transition) return; render(); if (activeUser) { await prepareAccountProfile(activeUser.id, () => profileGeneration === transition); if (profileGeneration === transition) void autosync.reconcile(); } } catch (error) { if (profileGeneration !== transition) return; profileLoadFailed = true; updateSyncStatus("離線／同步失敗", error instanceof Error ? error.message : "本機資料載入失敗。"); render(); } })(); });

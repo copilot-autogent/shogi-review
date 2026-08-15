@@ -173,7 +173,12 @@ export class IndexedDbRepository implements Repository {
       signal?.addEventListener("abort", abort, { once: true });
       transaction.objectStore("profiles").put(createBackup(data), profile);
       transaction.objectStore("syncBases").put({ ...base, data: createBackup(base.data) }, profile);
-      transaction.oncomplete = () => { settled = true; signal?.removeEventListener("abort", abort); resolve(); };
+      transaction.oncomplete = () => {
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        if (!canCommit()) { reject(new Error("同步身分已變更。")); return; }
+        resolve();
+      };
       transaction.onerror = () => { settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料儲存失敗。")); };
       transaction.onabort = () => { settled = true; signal?.removeEventListener("abort", abort); reject(transaction.error ?? new Error("本機同步資料交易已取消。")); };
     });
