@@ -165,8 +165,13 @@ export async function resolveConflict(
   const finalLocalHash = await payloadHash(readLocal());
   if (!ensureValid()) return abort();
   if (finalLocalHash !== localHash) {
-    if (deps.pending() === conflict) deps.setPending(undefined);
-    return "aborted";
+    const latestLocal = readLocal();
+    const refreshed = conflict.baseData
+      ? mergeAppData(conflict.baseData, latestLocal, next)
+      : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: next, reason: "membership" as const })) };
+    if (!ensureValid()) return abort();
+    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: finalLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
+    throw new Error("本機資料已更新，請重新確認目前資料。");
   }
   deps.setData(next);
   if (!ensureValid()) return abort();
