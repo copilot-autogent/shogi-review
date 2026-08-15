@@ -164,6 +164,14 @@ export async function resolveConflict(
     throw error;
   }
   if (!ensureValid()) return abort();
+  const finalLocal = readLocal();
+  const finalLocalHash = await payloadHash(finalLocal);
+  if (!ensureValid()) return abort();
+  if (finalLocalHash !== localHash) {
+    const refreshed = mergeAppData(next, finalLocal, next);
+    deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: finalLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
+    throw new Error("本機資料已更新，請重新確認目前資料。");
+  }
   deps.setPending(undefined);
   deps.onResolved();
   return "resolved";
@@ -180,6 +188,7 @@ async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) {
       signal.removeEventListener("abort", onAbort);
+      promise.then(() => undefined, () => undefined);
       reject(new Error("同步身分已變更。"));
       return;
     }
