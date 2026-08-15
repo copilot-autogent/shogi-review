@@ -58,7 +58,7 @@ export async function resolveConflict(
     if (!ensureValid()) return abort();
     const refreshed = conflict.baseData
       ? mergeAppData(conflict.baseData, local, latestCloud)
-      : { data: local, conflicts: conflict.conflicts };
+      : { data: local, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local, cloud: latestCloud, reason: "membership" as const })) };
     if (!ensureValid()) return abort();
     deps.setPending({
       ...conflict,
@@ -93,7 +93,7 @@ export async function resolveConflict(
   if (latestLocalHash !== localHash) {
     const refreshed = conflict.baseData
       ? mergeAppData(conflict.baseData, latestLocal, conflict.cloudData)
-      : { data: latestLocal, conflicts: conflict.conflicts };
+      : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: conflict.cloudData, reason: "membership" as const })) };
     if (!ensureValid()) return abort();
     deps.setPending({ ...conflict, localHash: latestLocalHash, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
@@ -102,6 +102,9 @@ export async function resolveConflict(
   // CAS may win immediately before logout; the post-CAS guard prevents that result
   // from crossing into the next profile's local, base, metadata, or UI state.
   if (!ensureValid()) return abort();
+  const afterCasLocalHash = await payloadHash(readLocal());
+  if (!ensureValid()) return abort();
+  if (afterCasLocalHash !== localHash) return abort();
   await deps.repository.saveProfile(identity.profile, next);
   if (!ensureValid()) return abort();
   const base: SyncBaseRecord = { data: next, revision: saved.revision, payloadHash: nextHash, hashVersion: 1 };
@@ -139,7 +142,11 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
       target.games.push(globalThis.structuredClone(sourceGame));
       return;
     }
-    if (item.field === "__membership" || item.field === "identity") Object.assign(game, globalThis.structuredClone(sourceGame));
+    if (item.field === "__membership" || item.field === "identity") {
+      const reviewPoints = game.reviewPoints;
+      Object.assign(game, globalThis.structuredClone(sourceGame));
+      game.reviewPoints = reviewPoints;
+    }
     else if (item.field === "title" || item.field === "perspective") (game as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourceGame as unknown as Record<string, unknown>)[item.field]);
     return;
   }
@@ -158,8 +165,8 @@ function applyConflictChoice(target: AppData, local: AppData, cloud: AppData, it
   if (item.field === "__membership" || item.field === "anchor") Object.assign(point, globalThis.structuredClone(sourcePoint));
   else if (item.field.startsWith("issueTags.")) {
     const tag = item.field.slice("issueTags.".length) as IssueTag;
-    point.issueTags = point.issueTags.filter((candidate) => candidate !== tag);
-    if (sourcePoint.issueTags.includes(tag)) point.issueTags.push(tag);
+    point.issueTags = (Array.isArray(point.issueTags) ? point.issueTags : []).filter((candidate) => candidate !== tag);
+    if (Array.isArray(sourcePoint.issueTags) && sourcePoint.issueTags.includes(tag)) point.issueTags.push(tag);
     point.issueTags = ISSUE_TAGS.filter((tagValue) => point.issueTags.includes(tagValue));
   } else (point as unknown as Record<string, unknown>)[item.field] = globalThis.structuredClone((sourcePoint as unknown as Record<string, unknown>)[item.field]);
 }
