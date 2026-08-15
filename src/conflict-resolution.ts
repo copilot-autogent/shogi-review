@@ -1,7 +1,7 @@
 import type { AppData, IssueTag } from "./model.js";
 import { mergeAppData, type MergeConflict } from "./merge.js";
 import { createCloudPayload, payloadHash, validateCloudPayload, type PendingConflict, type SyncIdentity, type SyncRepository, type SyncSnapshot } from "./sync.js";
-import type { ProfileRepository, SyncBaseRecord } from "./repository.js";
+import type { ProfileKey, SyncBaseRecord } from "./repository.js";
 import { ISSUE_TAGS } from "./model.js";
 
 export interface ConflictResolutionDependencies {
@@ -10,7 +10,7 @@ export interface ConflictResolutionDependencies {
   setPending: (conflict: PendingConflict | undefined) => void;
   data: () => AppData;
   setData: (data: AppData) => void;
-  repository: Pick<ProfileRepository, "saveProfileAndBase">;
+  repository: { saveProfileAndBase: (profile: ProfileKey, data: AppData, base: SyncBaseRecord, canCommit: () => boolean, signal: AbortSignal) => Promise<void> };
   cloud: SyncRepository;
   metadata: (uid: string, value: SyncSnapshot) => Promise<void> | void;
   onResolved: () => void;
@@ -167,7 +167,7 @@ export async function resolveConflict(
   const finalLocal = readLocal();
   const finalLocalHash = await payloadHash(finalLocal);
   if (!ensureValid()) return abort();
-  if (finalLocalHash !== localHash) {
+  if (finalLocalHash !== nextHash) {
     const refreshed = mergeAppData(next, finalLocal, next);
     deps.setPending({ ...conflict, baseData: next, rowRevision: saved.revision, localHash: finalLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
     throw new Error("本機資料已更新，請重新確認目前資料。");
