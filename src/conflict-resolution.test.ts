@@ -64,7 +64,7 @@ describe("identity-scoped conflict resolution", () => {
     const localHash = await hashEmpty();
     state.deps.setPending({ ...state.deps.pending()!, localHash });
     expect(await resolveConflict({}, state.deps)).toBe("resolved");
-    expect(state.writes).toEqual(["profile-base:user:old", "metadata", "data", "resolved"]);
+    expect(state.writes).toEqual(["profile-base:user:old", "data", "metadata", "resolved"]);
   });
 
   it("abandons before any write when logout races the cloud read", async () => {
@@ -123,7 +123,8 @@ describe("identity-scoped conflict resolution", () => {
         };
       }
       expect(await resolveConflict({}, state.deps)).toBe("aborted");
-      expect(state.writes).not.toContain("data");
+      if (boundary === "metadata") expect(state.writes).toContain("data");
+      else expect(state.writes).not.toContain("data");
     }
   });
 });

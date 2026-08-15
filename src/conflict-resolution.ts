@@ -144,16 +144,8 @@ export async function resolveConflict(
     throw error;
   }
   if (!ensureValid()) return abort();
-  const persistedLocalHash = await payloadHash(readLocal());
+  deps.setData(next);
   if (!ensureValid()) return abort();
-  if (persistedLocalHash !== localHash) {
-    const latestLocal = readLocal();
-    const refreshed = conflict.baseData
-      ? mergeAppData(conflict.baseData, latestLocal, next)
-      : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: next, reason: "membership" as const })) };
-    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: persistedLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
-    throw new Error("本機資料已更新，請重新確認目前資料。");
-  }
   const metadata: SyncSnapshot = { ownerUid: identity.uid, lastSyncedRevision: saved.revision, lastSyncedPayloadHash: nextHash, hashVersion: 1 };
   try {
     await deps.metadata(identity.uid, metadata);
@@ -161,19 +153,6 @@ export async function resolveConflict(
     if (!ensureValid()) return abort();
     throw error;
   }
-  if (!ensureValid()) return abort();
-  const finalLocalHash = await payloadHash(readLocal());
-  if (!ensureValid()) return abort();
-  if (finalLocalHash !== localHash) {
-    const latestLocal = readLocal();
-    const refreshed = conflict.baseData
-      ? mergeAppData(conflict.baseData, latestLocal, next)
-      : { data: latestLocal, conflicts: conflict.conflicts.slice(0, 1).map((item) => ({ ...item, entity: "game" as const, entityId: "*", field: "*", path: "library", base: undefined, local: latestLocal, cloud: next, reason: "membership" as const })) };
-    if (!ensureValid()) return abort();
-    deps.setPending({ ...conflict, rowRevision: saved.revision, localHash: finalLocalHash, cloudData: next, mergedData: refreshed.data, conflicts: refreshed.conflicts });
-    throw new Error("本機資料已更新，請重新確認目前資料。");
-  }
-  deps.setData(next);
   if (!ensureValid()) return abort();
   deps.setPending(undefined);
   deps.onResolved();
