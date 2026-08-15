@@ -318,6 +318,7 @@ async function removeLocalAccount(): Promise<void> {
     await activateProfile("guest");
     updateSyncStatus("僅本機");
   } catch (error) {
+    if (localAccountRemovalToken !== removalToken) throw error;
     activeUser = null;
     activeProfile = "guest";
     pendingConflict = undefined;
