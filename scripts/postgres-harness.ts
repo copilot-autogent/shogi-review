@@ -81,12 +81,14 @@ async function as(uid: string): Promise<Client> {
   await client.connect();
   await client.query("set role authenticated");
   await client.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+  await client.query("set statement_timeout = '10s'");
   return client;
 }
 async function anonymous(): Promise<Client> {
   const client = new Client(connection);
   await client.connect();
   await client.query("set role anon");
+  await client.query("set statement_timeout = '10s'");
   return client;
 }
 const a = await as(alice);
