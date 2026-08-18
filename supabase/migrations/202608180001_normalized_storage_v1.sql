@@ -164,7 +164,6 @@ declare
   game jsonb;
   point jsonb;
   recommendation jsonb;
-  recommendation_sort_order integer;
   diagnostics jsonb := '[]'::jsonb;
   seen_games text[] := '{}';
   seen_points text[] := '{}';
@@ -225,6 +224,7 @@ declare
   game jsonb;
   point jsonb;
   recommendation jsonb;
+  recommendation_sort_order integer;
   game_count integer := 0;
   point_count integer := 0;
   recommendation_count integer := 0;
