@@ -164,6 +164,7 @@ declare
   game jsonb;
   point jsonb;
   recommendation jsonb;
+  recommendation_sort_order integer;
   diagnostics jsonb := '[]'::jsonb;
   seen_games text[] := '{}';
   seen_points text[] := '{}';
@@ -256,10 +257,11 @@ begin
         case when point ? 'legacyNotes' then point->>'legacyNotes' else null end, point->>'createdAt');
       point_count := point_count + 1;
       if jsonb_typeof(point->'recommendedMoves') = 'array' then
-        for recommendation in select value, ordinality - 1 as sort_order from jsonb_array_elements(point->'recommendedMoves') with ordinality as items(value, ordinality) loop
+        for recommendation, recommendation_sort_order in
+          select value, ordinality - 1 from jsonb_array_elements(point->'recommendedMoves') with ordinality as items(value, ordinality) loop
           insert into public.recommended_moves(user_id, id, point_id, move, comment, sort_order)
-          values (uid, recommendation.value->>'id', point_row_id, recommendation.value->>'move',
-            case when recommendation.value ? 'comment' then recommendation.value->>'comment' else null end, recommendation.ordinality - 1);
+          values (uid, recommendation->>'id', point_row_id, recommendation->>'move',
+            case when recommendation ? 'comment' then recommendation->>'comment' else null end, recommendation_sort_order);
           recommendation_count := recommendation_count + 1;
         end loop;
       end if;
