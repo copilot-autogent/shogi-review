@@ -140,6 +140,12 @@ if (canonicalData(exportedData) !== canonicalData(parseBackup(sourceJson))) thro
 const targetHash = await payloadHash(exportedData);
 await a.query("select public.verify_my_migration($1, $2)", [sourceHash, targetHash]);
 await a.query("select public.finalize_my_cutover()");
+const repeatedFinalize = await a.query("select public.finalize_my_cutover() as result");
+if (repeatedFinalize.rows[0].result.status !== "finalized") throw new Error("repeated finalize was not idempotent");
+await expectFailure(a, "update public.user_state set payload = payload where user_id = $1", "legacy write after finalize", "legacy user_state writes are disabled", [alice]);
+await expectFailure(a, "delete from public.user_state where user_id = $1", "legacy delete after finalize", "legacy user_state writes are disabled", [alice]);
+const retainedLegacy = await a.query("select count(*)::int as count from public.user_state where user_id = $1", [alice]);
+if (retainedLegacy.rows[0].count !== 1) throw new Error("legacy backup row was not retained after finalize");
 const own = await a.query("select count(*)::int as count from public.games");
 const cross = await b.query("select count(*)::int as count from public.games");
 if (own.rows[0].count !== 2 || cross.rows[0].count !== 0) throw new Error("owner RLS matrix failed");
