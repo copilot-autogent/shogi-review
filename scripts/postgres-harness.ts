@@ -118,7 +118,8 @@ for (const [version, json] of [[1, v1Json], [2, v2Json]] as const) {
   await a.query("update public.user_state set payload = $1, revision = revision + 1 where user_id = $2", [json, alice]);
   const legacyAudit = await a.query("select public.audit_my_state_v1() as result");
   if (!legacyAudit.rows[0].result.ok) throw new Error(`schema-v${version} SQL audit rejected JS-valid fixture`);
-  await a.query("select public.migrate_my_state_v1($1)", [legacyHash]);
+  const migrated = await a.query("select public.migrate_my_state_v1($1) as result", [legacyHash]);
+  if (migrated.rows[0].result.status !== "migrated") throw new Error(`schema-v${version} SQL migration failed: ${migrated.rows[0].result.error}`);
   const legacyExport = (await a.query("select public.export_my_state_v3() as payload")).rows[0].payload;
   if (canonicalData(parseBackup(JSON.stringify(legacyExport))) !== canonicalData(parseBackup(json))) {
     throw new Error(`schema-v${version} SQL/JS parity mismatch`);
