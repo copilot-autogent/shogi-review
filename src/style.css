@@ -55,6 +55,7 @@ button:disabled { opacity: .45; cursor: default; }
 .actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; min-width: 0; }
 .actions > * { max-width: 100%; }
 .error { color: #a20d0d; min-height: 1.5em; }
+.success { color: #256b4c; font-weight: 700; }
 .warning { color: #7d421c; background: #fff2d2; padding: .6rem; border-radius: 6px; }
 .muted { color: #6d6257; }
 .game-card, .library-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; border-top: 1px solid #ead9bf; padding: .8rem 0; min-width: 0; }
