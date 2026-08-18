@@ -80,6 +80,15 @@ test("route shells remain contained at every required width", async ({ page }) =
   }
 });
 
+test("migration route is an authenticated gate and remains contained", async ({ page }) => {
+  for (const viewport of [{ width: 360, height: 800 }, { width: 1280, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("#/migration");
+    await expect(page.locator('[role="alert"]')).toContainText("請先登入");
+    await assertContained(page);
+  }
+});
+
 test("import, game, review reveal and continuation stay usable on a phone", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("#/import");

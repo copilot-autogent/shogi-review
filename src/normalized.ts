@@ -40,12 +40,19 @@ export interface NormalizedRepository {
 export interface LegacyStateRow { user_id: string; payload: unknown; revision: number; updated_at?: string; }
 export interface AuditResult { ok: boolean; issues: string[]; counts?: Record<string, number>; }
 export interface MigrationResult { status: string; counts: Record<string, number>; source_hash: string; }
+export interface MigrationStatus {
+  status: string;
+  source_hash?: string;
+  target_hash?: string | null;
+  counts?: Record<string, number>;
+}
 export interface NormalizedMigrationClient {
   readLegacy(): Promise<LegacyStateRow | null>;
   audit(): Promise<AuditResult>;
   migrate(sourceHash: string): Promise<MigrationResult>;
   export(): Promise<Backup>;
   verify(sourceHash: string, targetHash: string): Promise<{ status: string; target_hash: string }>;
+  readMigration(): Promise<MigrationStatus | null>;
   finalize(): Promise<{ status: string }>;
   rollback(payload: unknown, sourceHash: string, expectedRevision: number): Promise<{ status: string }>;
 }
@@ -66,7 +73,7 @@ export function canonicalNormalizedData(data: AppData): string {
   return canonicalData(data);
 }
 
-export function createNormalizedMigrationClient(client: SupabaseClient, userId: string): NormalizedMigrationClient {
+export function createNormalizedMigrationClient(client: SupabaseClient): NormalizedMigrationClient {
   const rpc = async <T>(fn: string, args?: Record<string, unknown>): Promise<T> => {
     const result = await client.rpc(fn, args);
     if (result.error) throw result.error;
@@ -74,7 +81,7 @@ export function createNormalizedMigrationClient(client: SupabaseClient, userId: 
   };
   return {
     async readLegacy() {
-      const { data, error } = await client.from("user_state").select("user_id,payload,revision,updated_at").eq("user_id", userId).maybeSingle();
+      const { data, error } = await client.from("user_state").select("user_id,payload,revision,updated_at").maybeSingle();
       if (error) throw error;
       return data as LegacyStateRow | null;
     },
@@ -86,6 +93,11 @@ export function createNormalizedMigrationClient(client: SupabaseClient, userId: 
     },
     export: () => rpc<Backup>("export_my_state_v3"),
     verify: (sourceHash, targetHash) => rpc("verify_my_migration", { source_hash: sourceHash, target_hash: targetHash }),
+    async readMigration() {
+      const { data, error } = await client.from("user_migrations").select("status,source_hash,target_hash,counts").maybeSingle();
+      if (error) throw error;
+      return data as MigrationStatus | null;
+    },
     async finalize() {
       const result = await rpc<{ status: string; error?: string }>("finalize_my_cutover");
       if (result.status !== "finalized") throw new Error(result.error ?? "normalized cutover finalization failed");
