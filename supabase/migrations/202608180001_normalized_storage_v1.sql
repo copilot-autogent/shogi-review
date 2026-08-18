@@ -136,7 +136,6 @@ declare
   item_id text;
   normalized_recommendations jsonb := '[]'::jsonb;
   seen_ids text[] := '{}';
-  value text;
 begin
   if jsonb_typeof(raw) <> 'object' or jsonb_typeof(raw->'id') <> 'string'
      or jsonb_typeof(raw->'ply') <> 'number' or jsonb_typeof(raw->'sfen') <> 'string'
@@ -148,14 +147,14 @@ begin
     or tag #>> '{}' not in ('序盤', '攻守判斷', '候選手', '王的安全', '駒的活用', '手筋', '寄せ・詰棋')) then
     raise exception 'invalid issue tags';
   end if;
-  foreach value in array array['thinking', 'tag', 'candidates', 'opponentResponse'] loop
-    if raw ? value and jsonb_typeof(raw->value) <> 'string' then raise exception 'invalid legacy text'; end if;
-    if raw ? value and btrim(raw->>value) <> '' then
-      legacy := array_append(legacy, case value
-        when 'thinking' then '當時想法：' when 'tag' then '標籤：'
-        when 'candidates' then '候選手：' else '對手應手：' end || raw->>value);
-    end if;
-  end loop;
+  if raw ? 'thinking' and jsonb_typeof(raw->'thinking') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'thinking' and btrim(raw->>'thinking') <> '' then legacy := array_append(legacy, '當時想法：' || (raw->>'thinking')); end if;
+  if raw ? 'tag' and jsonb_typeof(raw->'tag') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'tag' and btrim(raw->>'tag') <> '' then legacy := array_append(legacy, '標籤：' || (raw->>'tag')); end if;
+  if raw ? 'candidates' and jsonb_typeof(raw->'candidates') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'candidates' and btrim(raw->>'candidates') <> '' then legacy := array_append(legacy, '候選手：' || (raw->>'candidates')); end if;
+  if raw ? 'opponentResponse' and jsonb_typeof(raw->'opponentResponse') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'opponentResponse' and btrim(raw->>'opponentResponse') <> '' then legacy := array_append(legacy, '對手應手：' || (raw->>'opponentResponse')); end if;
   if category <> '' and category not in ('序盤知識', '候選手不足', '漏算對手強手', '戰術', '終盤', '時間管理', '其他') then
     legacy := array_append(legacy, '舊分類：' || category);
   end if;
