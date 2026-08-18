@@ -138,7 +138,8 @@ await a.query("select public.rollback_my_cutover($1::jsonb, $2)", [restored, sou
 const status = await a.query("select status from public.user_migrations where user_id = $1", [alice]);
 if (status.rows[0].status !== "rolled_back") throw new Error("rollback status not recorded");
 
-await expectFailure(b, "select count(*) from public.user_migrations", "cross-user migration read", false);
+const crossMigration = await b.query("select count(*)::int as count from public.user_migrations");
+if (crossMigration.rows[0].count !== 0) throw new Error("cross-user migration read exposed a row");
 await a.end();
 await b.end();
 await a2.end();
