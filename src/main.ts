@@ -9,6 +9,8 @@ import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import { AuthTransitionGate, drainLatestAuthTransitions, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 import { buildReviewViewModel, findReviewEntry, parseReviewRoute, renderReviewPage, reviewEntries, reviewRoute, type ReviewEntry, type ReviewState } from "./review-page.js";
+import { createNormalizedMigrationClient, type AuditResult, type MigrationStatus } from "./normalized.js";
+import { executeMigration, prepareMigration, reenterVerifiedMigration, type MigrationPreparation, type MigrationProof } from "./migration-flow.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -47,6 +49,12 @@ let reviewNavigation: ReviewEntry[] | undefined;
 let reviewState: ReviewState = { revealed: false, continuationOpen: false, displayedPly: 0, continuationPly: 0 };
 let reviewIdentity = "";
 let importDraft = { title: "", format: "KIF" as InputFormat, source: "", perspective: "spectator" as Perspective };
+let migrationPreparation: MigrationPreparation | undefined;
+let migrationProof: MigrationProof | undefined;
+let migrationStatus: MigrationStatus | null | undefined;
+let migrationBusy = false;
+let migrationAuditResult: AuditResult | undefined;
+let migrationErrorMessage = "";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
@@ -188,6 +196,7 @@ function render(): void {
   }
   if (renderedRoute !== route) resetScroll(); renderedRoute = route;
   if (route === "#/settings") renderSettings();
+  else if (route === "#/migration") renderMigration();
   else if (route === "#/games") renderGames();
   else renderHome();
 }
@@ -309,7 +318,77 @@ function navigateReview(direction: -1 | 1): void {
   if (next) location.hash = reviewRoute(next.game.id, next.point.id);
 }
 function renderSettings(): void {
-  selectedGame = undefined; const count = data.games.length; app!.innerHTML = `${header()}<main><a class="nav-link" href="#/">← 首頁</a><h1>設定</h1><div class="settings-grid"><section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>${esc(activeUser.email ?? "Google 帳號")}</strong></p><p>此裝置資料：${count} 局</p><p data-sync-status role="status" aria-live="polite">${esc(statusText())}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><button data-sync-retry ${syncStatus === "已同步" ? "hidden" : ""}>${syncStatus === "衝突" ? "處理衝突" : "立即同步"}</button><button id="logout-remove" class="danger">登出並移除此裝置的帳號資料</button>` : `<p>訪客資料只保存在此裝置。</p><button data-login>使用 Google 登入</button><button id="clear-guest" class="danger" ${count ? "" : "disabled"}>清除訪客資料</button>`}</section><section class="panel"><h2>備份與還原</h2><p>資料先保存在此裝置；登入後會安全同步至你的私人雲端。</p><div class="actions"><button id="export">下載備份</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section></div></main>`; bindCommon(); document.querySelector("#export")?.addEventListener("click", () => { generateBackup(); }); document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e)); document.querySelector("#clear-guest")?.addEventListener("click", () => openDestructive("clear-guest")); document.querySelector("#logout-remove")?.addEventListener("click", () => openDestructive("remove-profile")); document.querySelector("[data-sync-retry]")?.addEventListener("click", () => { if (pendingConflict) openDestructive("conflict"); else void syncNow(); });
+  selectedGame = undefined; const count = data.games.length; app!.innerHTML = `${header()}<main><a class="nav-link" href="#/">← 首頁</a><h1>設定</h1><div class="settings-grid"><section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>${esc(activeUser.email ?? "Google 帳號")}</strong></p><p>此裝置資料：${count} 局</p><p data-sync-status role="status" aria-live="polite">${esc(statusText())}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><button data-sync-retry ${syncStatus === "已同步" ? "hidden" : ""}>${syncStatus === "衝突" ? "處理衝突" : "立即同步"}  </button><a class="button-link secondary" href="#/migration">驗證資料遷移</a><button id="logout-remove" class="danger">登出並移除此裝置的帳號資料</button>` : `<p>訪客資料只保存在此裝置。</p><button data-login>使用 Google 登入</button><button id="clear-guest" class="danger" ${count ? "" : "disabled"}>清除訪客資料</button>`}</section><section class="panel"><h2>備份與還原</h2><p>資料先保存在此裝置；登入後會安全同步至你的私人雲端。</p><div class="actions"><button id="export">下載備份</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section></div></main>`; bindCommon(); document.querySelector("#export")?.addEventListener("click", () => { generateBackup(); }); document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e)); document.querySelector("#clear-guest")?.addEventListener("click", () => openDestructive("clear-guest")); document.querySelector("#logout-remove")?.addEventListener("click", () => openDestructive("remove-profile")); document.querySelector("[data-sync-retry]")?.addEventListener("click", () => { if (pendingConflict) openDestructive("conflict"); else void syncNow(); });
+}
+function downloadMigrationBackup(value: string): void {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([value], { type: "application/json;charset=utf-8" }));
+  link.download = "shogi-review-schema-v3-safety-backup.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+function migrationError(error: unknown): string {
+  if (error instanceof Error && error.message === "audit_rejected") return "稽核拒絕；請只依下方問題代碼處理。";
+  return "遷移驗證未完成；legacy remains authoritative。";
+}
+function renderMigration(): void {
+  selectedGame = undefined;
+  if (!activeUser) {
+    app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><section class="panel"><h1>資料遷移驗證</h1><p class="warning" role="alert">請先登入，才能使用已驗證的遷移功能。</p><a class="button-link" href="#/login" data-login>使用 Google 登入</a></section></main>`;
+    bindCommon();
+    return;
+  }
+  const preparation = migrationPreparation;
+  const audit = preparation?.audit ?? migrationAuditResult;
+  const counts = preparation ? countSummary(preparation.data) : formatAuditCounts(audit?.counts);
+  const proof = migrationProof ? `<section class="panel" data-migration-proof><h2>驗證完成</h2><p>status=verified</p><dl><dt>source hash</dt><dd><code>${esc(migrationProof.sourceHash)}</code></dd><dt>target hash</dt><dd><code>${esc(migrationProof.targetHash)}</code></dd><dt>games / review points / recommendations</dt><dd>${migrationProof.games} / ${migrationProof.points} / ${migrationProof.recommendations}</dd></dl><p class="warning">legacy remains authoritative；本階段不會切換讀寫來源。</p></section>` : "";
+  app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1><section class="panel"><p>此頁只供已登入帳號使用。先讀取目前的 legacy user_state，產生本機安全備份並完成稽核；不會上傳備份，也不會切換資料來源。</p><div class="actions"><button id="migration-audit" ${migrationBusy ? "disabled" : ""}>開始稽核與備份</button>${preparation ? `<button class="secondary" id="migration-download">下載 schema-v3 安全備份</button>` : ""}</div>${audit ? `<div class="backup-gate"><h2>稽核結果</h2><p>status=${audit.ok ? "ok" : "rejected"}</p><p>games / review points / recommendations: ${counts}</p><p>問題代碼：${audit.issues.length ? audit.issues.map(esc).join(", ") : "無"}</p></div>` : ""}${preparation && !migrationProof ? `<label class="check"><input id="migration-confirm" type="checkbox">我已確認備份可下載，並同意只在所有 parity 檢查通過後驗證遷移。</label><button id="migration-run" ${migrationBusy ? "disabled" : ""}>確認並驗證遷移</button>` : ""}<p id="migration-error" class="error" role="alert">${esc(migrationErrorMessage)}</p></section>${proof}</main>`;
+  bindCommon();
+  document.querySelector("#migration-audit")?.addEventListener("click", () => void startMigrationAudit());
+  document.querySelector("#migration-download")?.addEventListener("click", () => { if (preparation) downloadMigrationBackup(preparation.legacyBackup); });
+  document.querySelector("#migration-run")?.addEventListener("click", () => void runMigration());
+}
+function countSummary(value: AppData): string {
+  const points = value.games.reduce((total, game) => total + game.reviewPoints.length, 0);
+  const recommendations = value.games.reduce((total, game) => total + game.reviewPoints.reduce((count, point) => count + (point.recommendedMoves?.length ?? 0), 0), 0);
+  return `${value.games.length} / ${points} / ${recommendations}`;
+}
+function formatAuditCounts(value: Record<string, number> | undefined): string {
+  return `${value?.games ?? 0} / ${value?.points ?? value?.review_points ?? value?.reviewPoints ?? 0} / ${value?.recommendations ?? value?.recommended_moves ?? value?.recommendedMoves ?? 0}`;
+}
+async function startMigrationAudit(): Promise<void> {
+  if (!activeUser || migrationBusy) return;
+  const userId = activeUser.id;
+  migrationPreparation = undefined; migrationProof = undefined; migrationStatus = undefined; migrationAuditResult = undefined; migrationErrorMessage = "";
+  migrationBusy = true; renderMigration();
+  try {
+    const client = createNormalizedMigrationClient(supabase);
+    migrationPreparation = await prepareMigration(client);
+    if (activeUser?.id !== userId) return;
+    migrationStatus = await client.readMigration();
+    if (migrationStatus?.status === "verified") migrationProof = await reenterVerifiedMigration(client, migrationStatus, migrationPreparation.sourceHash);
+  } catch (error) {
+    migrationPreparation = undefined; migrationProof = undefined;
+    if (error instanceof Error && error.message === "audit_rejected") {
+      migrationAuditResult = (error as Error & { audit?: AuditResult }).audit;
+    }
+    migrationErrorMessage = migrationError(error);
+  } finally { migrationBusy = false; renderMigration(); }
+}
+async function runMigration(): Promise<void> {
+  if (!migrationPreparation || migrationBusy) return;
+  const userId = activeUser?.id;
+  const preparation = migrationPreparation;
+  const confirmation = document.querySelector<HTMLInputElement>("#migration-confirm");
+  if (!confirmation?.checked) { migrationErrorMessage = "請先勾選明確確認。"; renderMigration(); return; }
+  migrationBusy = true; renderMigration();
+  try {
+    if (!activeUser || activeUser.id !== userId) return;
+    const proof = await executeMigration(createNormalizedMigrationClient(supabase), preparation, true);
+    if (activeUser?.id !== userId) return;
+    migrationProof = proof;
+  } catch (error) { migrationErrorMessage = migrationError(error); }
+  finally { migrationBusy = false; renderMigration(); }
 }
 function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-login]").forEach((el) => el.addEventListener("click", (event) => { event.preventDefault(); void startGoogleLoginFromUi(); }));
@@ -439,6 +518,11 @@ async function removeLocalAccount(): Promise<void> {
     activeProfile = "guest";
     pendingConflict = undefined;
     pendingGuestImport = undefined;
+    migrationPreparation = undefined;
+    migrationProof = undefined;
+    migrationStatus = undefined;
+    migrationAuditResult = undefined;
+    migrationErrorMessage = "";
     profileLoadFailed = false;
     data = { games: [] };
     selectedGame = undefined;
