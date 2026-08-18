@@ -40,7 +40,7 @@ test("finalized status survives navigation and hard reload on phone and desktop"
     await expect(page.locator("#migration-audit, #migration-run, #migration-finalize")).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
     await page.goto("#/settings");
-    await expect(page.locator("[data-sync-status]")).toContainText("正規化雲端資料為權威來源");
+    await expect(page.locator("main [data-sync-status]")).toContainText("正規化雲端資料為權威來源");
     await page.goto("#/migration");
     await expect(page.locator("[data-migration-finalized]")).toBeVisible();
     await page.reload();
