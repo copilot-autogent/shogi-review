@@ -45,7 +45,23 @@ const source = {
 };
 const sourceJson = JSON.stringify(source);
 const sourceHash = await payloadHash(parseBackup(sourceJson));
-if (parseBackup(JSON.stringify({ schemaVersion: 2, data: source.data })).games.length !== 2) throw new Error("schema-v2 fixture did not parse");
+const legacyPoint = {
+  id: "point-legacy", ply: 0, sfen: parsedGame.sfens[0], category: "戰術",
+  thinking: "先看候選手", nextConsideration: "保留下一步", legacyNotes: "既有備註", issueTags: [],
+  createdAt: "2026-08-17T12:34:56.789+09:00", recommendedMoves: [{ id: "legacy-rec", move: " ７六歩 ", comment: " 候選 " }],
+};
+const legacyGame = { ...parsedGame, id: "legacy-game", title: "Legacy v1/v2", sourceText, createdAt: "2026-08-18T01:02:03.004-04:00", reviewPoints: [legacyPoint] };
+const v1Json = JSON.stringify({ schemaVersion: 1, data: { games: [legacyGame] } });
+const v2Json = JSON.stringify({ schemaVersion: 2, data: { games: [legacyGame] } });
+for (const [version, json] of [[1, v1Json], [2, v2Json]] as const) {
+  const migrated = parseBackup(json);
+  if (migrated.games[0].reviewPoints[0].reason !== "計算錯誤"
+    || migrated.games[0].reviewPoints[0].note !== "保留下一步"
+    || migrated.games[0].reviewPoints[0].legacyNotes !== "當時想法：先看候選手\n既有備註"
+    || migrated.games[0].reviewPoints[0].recommendedMoves?.[0].comment !== "候選") {
+    throw new Error(`schema-v${version} JS fixture did not migrate`);
+  }
+}
 
 const admin = new Client(connection);
 await admin.connect();
@@ -97,6 +113,19 @@ const a = await as(alice);
 const b = await as(bob);
 const a2 = await as(alice);
 const anon = await anonymous();
+for (const [version, json] of [[1, v1Json], [2, v2Json]] as const) {
+  const legacyHash = await payloadHash(parseBackup(json));
+  await a.query("update public.user_state set payload = $1, revision = revision + 1 where user_id = $2", [json, alice]);
+  const legacyAudit = await a.query("select public.audit_my_state_v1() as result");
+  if (!legacyAudit.rows[0].result.ok) throw new Error(`schema-v${version} SQL audit rejected JS-valid fixture`);
+  const migrated = await a.query("select public.migrate_my_state_v1($1) as result", [legacyHash]);
+  if (migrated.rows[0].result.status !== "migrated") throw new Error(`schema-v${version} SQL migration failed: ${migrated.rows[0].result.error}`);
+  const legacyExport = (await a.query("select public.export_my_state_v3() as payload")).rows[0].payload;
+  if (canonicalData(parseBackup(JSON.stringify(legacyExport))) !== canonicalData(parseBackup(json))) {
+    throw new Error(`schema-v${version} SQL/JS parity mismatch`);
+  }
+}
+await a.query("update public.user_state set payload = $1, revision = revision + 1 where user_id = $2", [sourceJson, alice]);
 await a.query("update public.user_state set payload = jsonb_set(payload, '{data,games,0,reviewPoints,0,reason}', '\"未知\"'::jsonb) where user_id = $1", [alice]);
 const malformedAudit = await a.query("select public.audit_my_state_v1() as result");
 if (malformedAudit.rows[0].result.ok || !malformedAudit.rows[0].result.issues.includes("invalid_reason")) throw new Error("malformed enum audit was not diagnosed");
@@ -120,7 +149,9 @@ if (anonymousRows.rowCount !== 0) throw new Error("anonymous RLS select exposed 
 await expectFailure(anon, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'anon','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "anonymous insert", "row-level security", [alice]);
 
 // A writer holding the legacy row lock must serialize before finalize and be observed.
-await a.query("select public.rollback_my_cutover($1::jsonb, $2)", [sourceJson, sourceHash]);
+const snapshot = await a.query("select revision, payload from public.user_state where user_id = $1", [alice]);
+const snapshotRevision = snapshot.rows[0].revision as number;
+await a.query("select public.rollback_my_cutover($1::jsonb, $2, $3)", [sourceJson, sourceHash, snapshotRevision]);
 await a.query("select public.migrate_my_state_v1($1)", [sourceHash]);
 await a.query("select public.verify_my_migration($1, $2)", [sourceHash, targetHash]);
 await a.query("begin");
@@ -128,15 +159,30 @@ await a.query("update public.user_state set payload = payload || jsonb_build_obj
 const blockedFinalize = a2.query("select public.finalize_my_cutover()");
 await new Promise((resolve) => setTimeout(resolve, 100));
 await a.query("commit");
-await expectFailurePromise(blockedFinalize, "concurrent writer vs finalize", "legacy payload changed");
+const blockedResult = (await blockedFinalize).rows[0].finalize_my_cutover;
+if (blockedResult.status !== "failed") throw new Error("concurrent finalize did not return failed status");
+const failedStatus = await a.query("select status, error from public.user_migrations where user_id = $1", [alice]);
+if (failedStatus.rows[0].status !== "failed" || !failedStatus.rows[0].error) throw new Error("finalize failure was not persisted");
 
 const restored = JSON.stringify(source);
 await a.query("update public.user_state set payload = $1 where user_id = $2", [restored, alice]);
 await a.query("select public.migrate_my_state_v1($1)", [sourceHash]);
 await a.query("select public.verify_my_migration($1, $2)", [sourceHash, targetHash]);
-await a.query("select public.rollback_my_cutover($1::jsonb, $2)", [restored, sourceHash]);
+const rollbackSnapshot = await a.query("select revision from public.user_state where user_id = $1", [alice]);
+await a.query("select public.rollback_my_cutover($1::jsonb, $2, $3)", [restored, sourceHash, rollbackSnapshot.rows[0].revision]);
 const status = await a.query("select status from public.user_migrations where user_id = $1", [alice]);
 if (status.rows[0].status !== "rolled_back") throw new Error("rollback status not recorded");
+
+await a.query("select public.migrate_my_state_v1($1)", [sourceHash]);
+await a.query("select public.verify_my_migration($1, $2)", [sourceHash, targetHash]);
+const guarded = await a.query("select revision from public.user_state where user_id = $1", [alice]);
+const guardedRevision = guarded.rows[0].revision as number;
+await a.query("update public.user_state set payload = payload || jsonb_build_object('newer', true), revision = revision + 1 where user_id = $1", [alice]);
+const stale = await a.query("select public.rollback_my_cutover($1::jsonb, $2, $3) as result", [restored, sourceHash, guardedRevision]);
+if (stale.rows[0].result.status !== "failed") throw new Error("stale rollback unexpectedly succeeded");
+const newer = await a.query("select payload->>'newer' as newer, revision from public.user_state where user_id = $1", [alice]);
+if (newer.rows[0].newer !== "true" || newer.rows[0].revision !== guardedRevision + 1) throw new Error("stale rollback overwrote newer legacy data");
+await expectFailure(a, "select public.rollback_my_cutover($1::jsonb, $2)", "missing rollback guard", "guard is required", [restored, sourceHash]);
 
 const crossMigration = await b.query("select count(*)::int as count from public.user_migrations");
 if (crossMigration.rows[0].count !== 0) throw new Error("cross-user migration read exposed a row");
@@ -151,15 +197,6 @@ async function expectFailure(client: Client, sql: string, label: string, expecte
     await client.query(sql, values);
     throw new Error(`${label} unexpectedly succeeded`);
   } catch (error) {
-    if (error instanceof Error && error.message === `${label} unexpectedly succeeded`) throw error;
-    if (!(error instanceof Error) || !error.message.toLowerCase().includes(expected.toLowerCase())) {
-      throw new Error(`${label} failed for an unexpected reason: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-}
-async function expectFailurePromise(promise: Promise<unknown>, label: string, expected: string): Promise<void> {
-  try { await promise; throw new Error(`${label} unexpectedly succeeded`); }
-  catch (error) {
     if (error instanceof Error && error.message === `${label} unexpectedly succeeded`) throw error;
     if (!(error instanceof Error) || !error.message.toLowerCase().includes(expected.toLowerCase())) {
       throw new Error(`${label} failed for an unexpected reason: ${error instanceof Error ? error.message : String(error)}`);

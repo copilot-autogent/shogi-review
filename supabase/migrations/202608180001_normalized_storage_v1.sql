@@ -104,6 +104,130 @@ create table if not exists public.user_migrations (
   constraint user_migrations_status_check check (status in ('migrated', 'verified', 'finalized', 'failed', 'rolled_back'))
 );
 
+alter table public.user_migrations add column if not exists source_revision integer;
+
+create or replace function public.normalized_v1_canonical_point(raw jsonb)
+returns jsonb
+language plpgsql
+immutable
+as $$
+declare
+  tags jsonb := coalesce(raw->'issueTags', '[]'::jsonb);
+  category text := case when jsonb_typeof(raw->'category') = 'string' then raw->>'category' else '' end;
+  mapped_reason text := case category
+    when '序盤知識' then '計畫或方向錯誤'
+    when '候選手不足' then '不知道怎麼走'
+    when '漏算對手強手' then '漏看對手的手'
+    when '戰術' then '計算錯誤'
+    when '終盤' then '終盤失誤'
+    when '時間管理' then '時間不足'
+    else '其他'
+  end;
+  mapped_tag text := case category
+    when '序盤知識' then '序盤'
+    when '候選手不足' then '候選手'
+    when '戰術' then '手筋'
+    when '終盤' then '寄せ・詰棋'
+    else null
+  end;
+  reason text;
+  legacy text[] := '{}';
+  item jsonb;
+  item_id text;
+  normalized_recommendations jsonb := '[]'::jsonb;
+  seen_ids text[] := '{}';
+begin
+  if jsonb_typeof(raw) <> 'object' or not (raw ? 'id') or jsonb_typeof(raw->'id') <> 'string'
+     or not (raw ? 'ply') or jsonb_typeof(raw->'ply') <> 'number' or not (raw ? 'sfen')
+     or jsonb_typeof(raw->'sfen') <> 'string' or not (raw ? 'createdAt')
+     or jsonb_typeof(raw->'createdAt') <> 'string' then
+    raise exception 'invalid review point';
+  end if;
+  if raw ? 'issueTags' and jsonb_typeof(raw->'issueTags') <> 'array' then raise exception 'invalid issue tags'; end if;
+  if exists (select 1 from jsonb_array_elements(tags) tag where jsonb_typeof(tag) <> 'string'
+    or tag #>> '{}' not in ('序盤', '攻守判斷', '候選手', '王的安全', '駒的活用', '手筋', '寄せ・詰棋')) then
+    raise exception 'invalid issue tags';
+  end if;
+  if raw ? 'thinking' and jsonb_typeof(raw->'thinking') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'thinking' and btrim(raw->>'thinking') <> '' then legacy := array_append(legacy, '當時想法：' || (raw->>'thinking')); end if;
+  if raw ? 'tag' and jsonb_typeof(raw->'tag') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'tag' and btrim(raw->>'tag') <> '' then legacy := array_append(legacy, '標籤：' || (raw->>'tag')); end if;
+  if raw ? 'candidates' and jsonb_typeof(raw->'candidates') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'candidates' and btrim(raw->>'candidates') <> '' then legacy := array_append(legacy, '候選手：' || (raw->>'candidates')); end if;
+  if raw ? 'opponentResponse' and jsonb_typeof(raw->'opponentResponse') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'opponentResponse' and btrim(raw->>'opponentResponse') <> '' then legacy := array_append(legacy, '對手應手：' || (raw->>'opponentResponse')); end if;
+  if category <> '' and category not in ('序盤知識', '候選手不足', '漏算對手強手', '戰術', '終盤', '時間管理', '其他') then
+    legacy := array_append(legacy, '舊分類：' || category);
+  end if;
+  if raw ? 'nextConsideration' and jsonb_typeof(raw->'nextConsideration') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'externalNotes' and jsonb_typeof(raw->'externalNotes') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'legacyNotes' and jsonb_typeof(raw->'legacyNotes') <> 'string' then raise exception 'invalid legacy text'; end if;
+  if raw ? 'note' and jsonb_typeof(raw->'note') <> 'string' then raise exception 'invalid note'; end if;
+  if raw ? 'reason' and (jsonb_typeof(raw->'reason') <> 'string' or raw->>'reason' not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他')) then
+    raise exception 'invalid reason';
+  end if;
+  if raw ? 'ply' and ((raw->>'ply') !~ '^[0-9]+$' or (raw->>'ply')::numeric > 2147483647) then raise exception 'invalid ply'; end if;
+  reason := case when raw ? 'reason' then raw->>'reason' else mapped_reason end;
+  if raw ? 'recommendedMoves' then
+    if jsonb_typeof(raw->'recommendedMoves') <> 'array' then raise exception 'invalid recommendations'; end if;
+    for item in select value from jsonb_array_elements(raw->'recommendedMoves') loop
+      if jsonb_typeof(item) <> 'object' or jsonb_typeof(item->'id') <> 'string'
+        or btrim(item->>'id') = '' or btrim(item->>'id') = any(seen_ids)
+        or jsonb_typeof(item->'move') <> 'string' or btrim(item->>'move') = '' then
+        raise exception 'invalid recommendations';
+      end if;
+      if item ? 'comment' and jsonb_typeof(item->'comment') <> 'string' then raise exception 'invalid recommendation comment'; end if;
+      item_id := btrim(item->>'id');
+      seen_ids := array_append(seen_ids, item_id);
+      normalized_recommendations := normalized_recommendations || jsonb_build_array(
+        jsonb_build_object('id', item_id, 'move', btrim(item->>'move'))
+        || case when item ? 'comment' and btrim(item->>'comment') <> '' then jsonb_build_object('comment', btrim(item->>'comment')) else '{}'::jsonb end);
+    end loop;
+  end if;
+  return jsonb_build_object('id', raw->>'id', 'ply', (raw->>'ply')::integer, 'sfen', raw->>'sfen',
+    'reason', reason, 'issueTags', tags,
+    'createdAt', raw->>'createdAt')
+    || case when raw ? 'note' and btrim(raw->>'note') <> '' then jsonb_build_object('note', raw->>'note')
+      when raw ? 'nextConsideration' and btrim(raw->>'nextConsideration') <> '' then jsonb_build_object('note', raw->>'nextConsideration')
+      else '{}'::jsonb end
+    || case when raw ? 'externalNotes' and btrim(raw->>'externalNotes') <> '' then jsonb_build_object('externalNotes', raw->>'externalNotes') else '{}'::jsonb end
+    || case when cardinality(legacy) > 0 or (raw ? 'legacyNotes' and btrim(raw->>'legacyNotes') <> '') then
+      jsonb_build_object('legacyNotes', concat_ws(E'\n', nullif(array_to_string(legacy, E'\n'), ''), nullif(raw->>'legacyNotes', ''))) else '{}'::jsonb end
+    || case when mapped_tag is not null and not tags @> jsonb_build_array(mapped_tag) then jsonb_build_object('issueTags', tags || jsonb_build_array(mapped_tag)) else '{}'::jsonb end
+    || case when jsonb_array_length(normalized_recommendations) > 0 then jsonb_build_object('recommendedMoves', normalized_recommendations) else '{}'::jsonb end;
+end
+$$;
+
+create or replace function public.normalized_v1_canonical_game(raw jsonb)
+returns jsonb
+language plpgsql
+immutable
+as $$
+declare point jsonb; points jsonb := '[]'::jsonb;
+begin
+  if jsonb_typeof(raw) <> 'object' or not (raw ? 'id') or jsonb_typeof(raw->'id') <> 'string'
+    or not (raw ? 'title') or jsonb_typeof(raw->'title') <> 'string'
+    or not (raw ? 'sourceFormat') or jsonb_typeof(raw->'sourceFormat') <> 'string'
+    or not (raw ? 'sourceText') or jsonb_typeof(raw->'sourceText') <> 'string'
+    or not (raw ? 'initialSfen') or jsonb_typeof(raw->'initialSfen') <> 'string'
+    or not (raw ? 'sfens') or jsonb_typeof(raw->'sfens') <> 'array'
+    or not (raw ? 'moves') or jsonb_typeof(raw->'moves') <> 'array'
+    or not (raw ? 'canonicalHash') or jsonb_typeof(raw->'canonicalHash') <> 'string'
+    or not (raw ? 'createdAt') or jsonb_typeof(raw->'createdAt') <> 'string'
+    or not (raw ? 'reviewPoints') or jsonb_typeof(raw->'reviewPoints') <> 'array' then raise exception 'invalid game'; end if;
+  if raw ? 'perspective' and (jsonb_typeof(raw->'perspective') <> 'string'
+    or raw->>'perspective' not in ('sente', 'gote', 'spectator')) then raise exception 'invalid perspective'; end if;
+  for point in select value from jsonb_array_elements(raw->'reviewPoints') loop
+    points := points || jsonb_build_array(public.normalized_v1_canonical_point(point));
+  end loop;
+  return jsonb_build_object('id', raw->>'id', 'title', raw->>'title', 'sourceFormat', raw->>'sourceFormat',
+    'sourceText', raw->>'sourceText', 'initialSfen', raw->>'initialSfen', 'sfens', raw->'sfens',
+    'moves', raw->'moves', 'canonicalHash', raw->>'canonicalHash', 'createdAt', raw->>'createdAt',
+    'reviewPoints', points)
+    || case when raw ? 'perspective' then jsonb_build_object('perspective', raw->'perspective') else '{}'::jsonb end;
+end
+$$;
+
 alter table public.games enable row level security;
 alter table public.games force row level security;
 alter table public.review_points enable row level security;
@@ -159,6 +283,15 @@ as $$
   end
 $$;
 
+create or replace function public.normalized_v1_canonical_games(value jsonb)
+returns jsonb
+language sql
+immutable
+as $$
+  select coalesce(jsonb_agg(public.normalized_v1_canonical_game(game) order by ordinality), '[]'::jsonb)
+  from jsonb_array_elements(public.normalized_v1_payload_games(value)) with ordinality as items(game, ordinality)
+$$;
+
 create or replace function public.audit_my_state_v1()
 returns jsonb
 language plpgsql
@@ -178,6 +311,7 @@ declare
   game_id text;
   point_id text;
   reason text;
+  category text;
   source_format text;
 begin
   if uid is null then return jsonb_build_object('ok', false, 'issues', jsonb_build_array('unauthenticated')); end if;
@@ -202,7 +336,17 @@ begin
       point_id := point->>'id';
       reason := point->>'reason';
       if point_id is null or point_id = any(seen_points) then diagnostics := diagnostics || jsonb_build_array('duplicate_or_missing_point_id'); else seen_points := array_append(seen_points, point_id); end if;
-      if coalesce(reason, '') not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
+      category := case when jsonb_typeof(point->'category') = 'string' then point->>'category' else null end;
+      if point ? 'reason' and coalesce(reason, '') not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
+      if exists (select 1 from jsonb_each(point) field where field.key = any(array['thinking', 'tag', 'candidates', 'opponentResponse', 'nextConsideration', 'externalNotes', 'legacyNotes', 'note']) and jsonb_typeof(field.value) <> 'string') then
+        diagnostics := diagnostics || jsonb_build_array('invalid_review_text');
+      end if;
+      if point ? 'issueTags' and jsonb_typeof(point->'issueTags') <> 'array' then
+        diagnostics := diagnostics || jsonb_build_array('invalid_issue_tags');
+      elsif point ? 'issueTags' and exists (select 1 from jsonb_array_elements(point->'issueTags') tag where jsonb_typeof(tag) <> 'string'
+        or tag #>> '{}' not in ('序盤', '攻守判斷', '候選手', '王的安全', '駒的活用', '手筋', '寄せ・詰棋')) then
+        diagnostics := diagnostics || jsonb_build_array('invalid_issue_tags');
+      end if;
       if point->>'ply' is null or (point->>'ply') !~ '^[0-9]+$' then diagnostics := diagnostics || jsonb_build_array('invalid_ply'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') <> 'array' then diagnostics := diagnostics || jsonb_build_array('malformed_recommendations'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') = 'array' then
@@ -227,6 +371,7 @@ as $$
 declare
   uid uuid := (select auth.uid());
   legacy_payload jsonb;
+  legacy_revision integer;
   game jsonb;
   point jsonb;
   recommendation jsonb;
@@ -242,7 +387,7 @@ declare
 begin
   if uid is null then raise exception 'normalized migration requires auth.uid()'; end if;
   if source_hash is null or source_hash = '' then raise exception 'source_hash is required'; end if;
-  select payload into legacy_payload from public.user_state where user_id = uid for update;
+  select payload, revision into legacy_payload, legacy_revision from public.user_state where user_id = uid for update;
   if not found then raise exception 'legacy user_state row is missing'; end if;
   if exists (select 1 from public.user_migrations where user_id = uid and status = 'finalized') then
     raise exception 'migration is finalized; normalized writes require export/manual rollback';
@@ -252,7 +397,7 @@ begin
   delete from public.review_points where user_id = uid;
   delete from public.games where user_id = uid;
   for game, game_source_order in
-    select value, ordinality - 1 from jsonb_array_elements(public.normalized_v1_payload_games(legacy_payload)) with ordinality as items(value, ordinality) loop
+    select value, ordinality - 1 from jsonb_array_elements(public.normalized_v1_canonical_games(legacy_payload)) with ordinality as items(value, ordinality) loop
     game_row_id := game->>'id';
     insert into public.games(user_id, id, title, source_format, source_text, initial_sfen, sfens, moves, canonical_hash, created_at_text, source_order, perspective, perspective_present)
     values (uid, game_row_id, game->>'title', game->>'sourceFormat', game->>'sourceText', game->>'initialSfen',
@@ -281,18 +426,20 @@ begin
       end if;
     end loop;
   end loop;
-  insert into public.user_migrations(user_id, migration_version, status, source_payload, source_hash, counts, error)
+  insert into public.user_migrations(user_id, migration_version, status, source_payload, source_hash, counts, error, source_revision)
   values (uid, 1, 'migrated', legacy_payload, source_hash,
-    jsonb_build_object('games', game_count, 'points', point_count, 'recommendations', recommendation_count), null)
+    jsonb_build_object('games', game_count, 'points', point_count, 'recommendations', recommendation_count), null, legacy_revision)
   on conflict (user_id) do update set migration_version = excluded.migration_version, status = excluded.status,
     source_payload = excluded.source_payload, source_hash = excluded.source_hash, target_hash = null, counts = excluded.counts,
-    migrated_at = now(), verified_at = null, finalized_at = null, rolled_back_at = null, error = null;
+    migrated_at = now(), verified_at = null, finalized_at = null, rolled_back_at = null, error = null,
+    source_revision = excluded.source_revision;
   select * into migration from public.user_migrations where user_id = uid;
   return jsonb_build_object('status', migration.status, 'counts', migration.counts, 'source_hash', migration.source_hash);
 exception when others then
-  insert into public.user_migrations(user_id, migration_version, status, source_payload, source_hash, error)
-  values (uid, 1, 'failed', coalesce(legacy_payload, '{}'::jsonb), coalesce(source_hash, ''), sqlerrm)
-  on conflict (user_id) do update set status = 'failed', error = sqlerrm;
+  insert into public.user_migrations(user_id, migration_version, status, source_payload, source_hash, error, source_revision)
+  values (uid, 1, 'failed', coalesce(legacy_payload, '{}'::jsonb), coalesce(source_hash, ''), sqlerrm, legacy_revision)
+  on conflict (user_id) do update set status = 'failed', source_payload = excluded.source_payload,
+    source_hash = excluded.source_hash, source_revision = excluded.source_revision, error = sqlerrm;
   return jsonb_build_object('status', 'failed', 'error', sqlerrm);
 end
 $$;
@@ -368,10 +515,38 @@ begin
   if not found or current.status <> 'verified' then raise exception 'migration must be verified before finalization'; end if;
   if live_payload is distinct from current.source_payload then
     update public.user_migrations set status = 'failed', error = 'legacy payload changed after snapshot' where user_id = uid;
-    raise exception 'legacy payload changed after snapshot';
+    return jsonb_build_object('status', 'failed', 'error', 'legacy payload changed after snapshot');
   end if;
   update public.user_migrations set status = 'finalized', finalized_at = now(), error = null where user_id = uid;
   return jsonb_build_object('status', 'finalized');
+end
+$$;
+
+create or replace function public.rollback_my_cutover(payload jsonb, target_hash text, expected_revision integer)
+returns jsonb
+language plpgsql
+security invoker
+as $$
+declare uid uuid := (select auth.uid()); current public.user_migrations%rowtype; live_revision integer; live_payload jsonb;
+begin
+  if uid is null then raise exception 'cutover rollback requires auth.uid()'; end if;
+  select * into current from public.user_migrations where user_id = uid for update;
+  if not found or current.status not in ('migrated', 'verified', 'finalized') then raise exception 'migration is not inside rollback window'; end if;
+  if target_hash is null or target_hash <> current.source_hash then raise exception 'rollback hash mismatch'; end if;
+  if payload is distinct from current.source_payload then raise exception 'rollback payload does not match migration snapshot'; end if;
+  if expected_revision is null or current.source_revision is null or expected_revision <> current.source_revision then
+    raise exception 'rollback revision guard is missing or stale';
+  end if;
+  select us.payload, us.revision into live_payload, live_revision from public.user_state as us where us.user_id = uid for update;
+  if not found then raise exception 'legacy user_state row is missing'; end if;
+  if live_revision <> expected_revision or live_payload is distinct from current.source_payload then
+    update public.user_migrations set status = 'failed', error = 'legacy payload changed after snapshot' where user_id = uid;
+    return jsonb_build_object('status', 'failed', 'error', 'legacy payload changed after snapshot', 'revision', live_revision);
+  end if;
+  update public.user_state set payload = rollback_my_cutover.payload, revision = revision + 1 where user_id = uid and revision = expected_revision;
+  if not found then raise exception 'legacy user_state row is missing'; end if;
+  update public.user_migrations set status = 'rolled_back', rolled_back_at = now(), error = null where user_id = uid;
+  return jsonb_build_object('status', 'rolled_back');
 end
 $$;
 
@@ -380,17 +555,8 @@ returns jsonb
 language plpgsql
 security invoker
 as $$
-declare uid uuid := (select auth.uid()); current public.user_migrations%rowtype;
 begin
-  if uid is null then raise exception 'cutover rollback requires auth.uid()'; end if;
-  select * into current from public.user_migrations where user_id = uid for update;
-  if not found or current.status not in ('migrated', 'verified', 'finalized') then raise exception 'migration is not inside rollback window'; end if;
-  if target_hash is null or target_hash <> current.source_hash then raise exception 'rollback hash mismatch'; end if;
-  if payload is distinct from current.source_payload then raise exception 'rollback payload does not match migration snapshot'; end if;
-  update public.user_state set payload = rollback_my_cutover.payload, revision = revision + 1 where user_id = uid;
-  if not found then raise exception 'legacy user_state row is missing'; end if;
-  update public.user_migrations set status = 'rolled_back', rolled_back_at = now(), error = null where user_id = uid;
-  return jsonb_build_object('status', 'rolled_back');
+  raise exception 'rollback revision guard is required';
 end
 $$;
 
@@ -399,4 +565,5 @@ grant execute on function public.migrate_my_state_v1(text) to authenticated;
 grant execute on function public.export_my_state_v3() to authenticated;
 grant execute on function public.verify_my_migration(text, text) to authenticated;
 grant execute on function public.finalize_my_cutover() to authenticated;
+grant execute on function public.rollback_my_cutover(jsonb, text, integer) to authenticated;
 grant execute on function public.rollback_my_cutover(jsonb, text) to authenticated;

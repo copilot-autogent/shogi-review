@@ -47,7 +47,7 @@ export interface NormalizedMigrationClient {
   export(): Promise<Backup>;
   verify(sourceHash: string, targetHash: string): Promise<{ status: string; target_hash: string }>;
   finalize(): Promise<{ status: string }>;
-  rollback(payload: unknown, sourceHash: string): Promise<{ status: string }>;
+  rollback(payload: unknown, sourceHash: string, expectedRevision: number): Promise<{ status: string }>;
 }
 
 export function normalizedStorageEnabled(): boolean {
@@ -86,8 +86,18 @@ export function createNormalizedMigrationClient(client: SupabaseClient, userId: 
     },
     export: () => rpc<Backup>("export_my_state_v3"),
     verify: (sourceHash, targetHash) => rpc("verify_my_migration", { source_hash: sourceHash, target_hash: targetHash }),
-    finalize: () => rpc("finalize_my_cutover"),
-    rollback: (payload, sourceHash) => rpc("rollback_my_cutover", { payload, target_hash: sourceHash }),
+    async finalize() {
+      const result = await rpc<{ status: string; error?: string }>("finalize_my_cutover");
+      if (result.status !== "finalized") throw new Error(result.error ?? "normalized cutover finalization failed");
+      return result;
+    },
+    async rollback(payload, sourceHash, expectedRevision) {
+      const result = await rpc<{ status: string; error?: string }>("rollback_my_cutover", {
+        payload, target_hash: sourceHash, expected_revision: expectedRevision,
+      });
+      if (result.status !== "rolled_back") throw new Error(result.error ?? "normalized rollback failed");
+      return result;
+    },
   };
 }
 
