@@ -515,7 +515,7 @@ begin
   if expected_revision is null or current.source_revision is null or expected_revision <> current.source_revision then
     raise exception 'rollback revision guard is missing or stale';
   end if;
-  select payload, revision into live_payload, live_revision from public.user_state where user_id = uid for update;
+  select us.payload, us.revision into live_payload, live_revision from public.user_state as us where us.user_id = uid for update;
   if not found then raise exception 'legacy user_state row is missing'; end if;
   if live_revision <> expected_revision or live_payload is distinct from current.source_payload then
     return jsonb_build_object('status', 'failed', 'error', 'legacy payload changed after snapshot', 'revision', live_revision);
