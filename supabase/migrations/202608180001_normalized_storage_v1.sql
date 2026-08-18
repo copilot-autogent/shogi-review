@@ -113,8 +113,11 @@ security definer
 set search_path = public
 as $$
 begin
-  if current_setting('shogi_review.rollback', true) = 'on' then
-    return new;
+  if tg_op = 'DELETE' then
+    if exists (select 1 from public.user_migrations where user_id = old.user_id and status = 'finalized') then
+      raise exception 'legacy user_state writes are disabled after normalized cutover';
+    end if;
+    return old;
   end if;
   if exists (
     select 1 from public.user_migrations
@@ -128,7 +131,7 @@ $$;
 
 drop trigger if exists normalized_v1_guard_legacy_write on public.user_state;
 create trigger normalized_v1_guard_legacy_write
-before insert or update on public.user_state
+before insert or update or delete on public.user_state
 for each row execute function public.normalized_v1_guard_legacy_write();
 
 create or replace function public.normalized_v1_canonical_point(raw jsonb)
@@ -571,10 +574,9 @@ begin
     update public.user_migrations set status = 'failed', error = 'legacy payload changed after snapshot' where user_id = uid;
     return jsonb_build_object('status', 'failed', 'error', 'legacy payload changed after snapshot', 'revision', live_revision);
   end if;
-  perform set_config('shogi_review.rollback', 'on', true);
+  update public.user_migrations set status = 'rolled_back', rolled_back_at = now(), error = null where user_id = uid;
   update public.user_state set payload = rollback_my_cutover.payload, revision = revision + 1 where user_id = uid and revision = expected_revision;
   if not found then raise exception 'legacy user_state row is missing'; end if;
-  update public.user_migrations set status = 'rolled_back', rolled_back_at = now(), error = null where user_id = uid;
   return jsonb_build_object('status', 'rolled_back');
 end
 $$;
