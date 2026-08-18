@@ -1,7 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
+import { SUPABASE_URL } from "../src/sync.js";
 
 const userId = "00000000-0000-0000-0000-000000000001";
-const authStorageKey = "sb-yuymtghhqszcfbhhhhyq-auth-token";
+const authStorageKey = `sb-${new URL(SUPABASE_URL).hostname.split(".")[0]}-auth-token`;
 
 async function mockFinalizedAccount(page: Page): Promise<void> {
   await page.addInitScript(({ key, id }) => {

@@ -347,8 +347,8 @@ function renderMigration(): void {
     return;
   }
   const status = migrationStatus ?? authority?.status;
-  if (status?.status === "finalized" || authority?.authority === "normalized") {
-    app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1>${renderFinalizedMigrationStatus(status ?? { status: "finalized" }, data)}</main>`;
+  if (status?.status === "finalized") {
+    app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1>${renderFinalizedMigrationStatus(status, data)}</main>`;
     bindCommon();
     return;
   }
@@ -708,11 +708,6 @@ async function removeLocalAccount(): Promise<void> {
     activeProfile = "guest";
     pendingConflict = undefined;
     pendingGuestImport = undefined;
-    migrationPreparation = undefined;
-    migrationProof = undefined;
-    migrationStatus = undefined;
-    migrationAuditResult = undefined;
-    migrationErrorMessage = "";
     migrationPreparation = undefined;
     migrationProof = undefined;
     migrationStatus = undefined;

@@ -24,12 +24,13 @@ describe("finalized migration status rendering", () => {
       status: "finalized",
       source_hash: "source-hash",
       target_hash: "target-hash",
+      counts: { games: 6, review_points: 9, recommended_moves: 11 },
     }, { games: [game] });
 
     expect(html).toContain("status=finalized");
     expect(html).toContain("source-hash");
     expect(html).toContain("target-hash");
-    expect(html).toContain("1 / 1 / 1");
+    expect(html).toContain("6 / 9 / 11");
     expect(html).toContain("正規化雲端資料現在是此帳號的權威來源；legacy 備份已保留。");
     expect(html).not.toContain("私的棋局標題");
     expect(html).not.toContain("私的複盤內容");
