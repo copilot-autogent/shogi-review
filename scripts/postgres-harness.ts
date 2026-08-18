@@ -53,6 +53,8 @@ await admin.query("create schema if not exists auth");
 await admin.query(`create or replace function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$`);
 await admin.query("do $$ begin create role authenticated nologin; exception when duplicate_object then null; end $$");
 await admin.query("do $$ begin create role anon nologin; exception when duplicate_object then null; end $$");
+await admin.query("grant usage on schema auth to authenticated, anon");
+await admin.query("grant execute on function auth.uid() to authenticated, anon");
 await admin.query(`create table if not exists public.user_state (
   user_id uuid primary key, payload jsonb not null, revision integer not null default 1,
   updated_at timestamptz not null default now()
