@@ -106,6 +106,31 @@ create table if not exists public.user_migrations (
 
 alter table public.user_migrations add column if not exists source_revision integer;
 
+create or replace function public.normalized_v1_guard_legacy_write()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if current_setting('shogi_review.rollback', true) = 'on' then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.user_migrations
+    where user_id = new.user_id and status = 'finalized'
+  ) then
+    raise exception 'legacy user_state writes are disabled after normalized cutover';
+  end if;
+  return new;
+end
+$$;
+
+drop trigger if exists normalized_v1_guard_legacy_write on public.user_state;
+create trigger normalized_v1_guard_legacy_write
+before insert or update on public.user_state
+for each row execute function public.normalized_v1_guard_legacy_write();
+
 create or replace function public.normalized_v1_canonical_point(raw jsonb)
 returns jsonb
 language plpgsql
@@ -512,6 +537,9 @@ begin
   select payload into live_payload from public.user_state where user_id = uid for update;
   if not found then raise exception 'legacy user_state row is missing'; end if;
   select * into current from public.user_migrations where user_id = uid for update;
+  if found and current.status = 'finalized' then
+    return jsonb_build_object('status', 'finalized');
+  end if;
   if not found or current.status <> 'verified' then raise exception 'migration must be verified before finalization'; end if;
   if live_payload is distinct from current.source_payload then
     update public.user_migrations set status = 'failed', error = 'legacy payload changed after snapshot' where user_id = uid;
@@ -543,6 +571,7 @@ begin
     update public.user_migrations set status = 'failed', error = 'legacy payload changed after snapshot' where user_id = uid;
     return jsonb_build_object('status', 'failed', 'error', 'legacy payload changed after snapshot', 'revision', live_revision);
   end if;
+  perform set_config('shogi_review.rollback', 'on', true);
   update public.user_state set payload = rollback_my_cutover.payload, revision = revision + 1 where user_id = uid and revision = expected_revision;
   if not found then raise exception 'legacy user_state row is missing'; end if;
   update public.user_migrations set status = 'rolled_back', rolled_back_at = now(), error = null where user_id = uid;
