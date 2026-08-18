@@ -165,7 +165,7 @@ export class SupabaseNormalizedRuntime {
     const data: AppData = {
       games: mapped.map(({ version: _version, sourceOrder: _sourceOrder, perspectivePresent, perspective, reviewPoints, ...game }) => ({
         ...game,
-        reviewPoints: reviewPoints.map(({ version: _version, sourceOrder: _sourceOrder, notes, ...point }) => ({
+        reviewPoints: reviewPoints.map(({ version: _version, sourceOrder: _sourceOrder, gameId: _gameId, notes, ...point }) => ({
           ...point,
           ...(notes ? { note: notes } : {}),
           recommendedMoves: point.recommendedMoves.map(({ pointId: _pointId, sortOrder: _sortOrder, version: _version, comment, ...item }) => ({
