@@ -137,8 +137,9 @@ declare
   normalized_recommendations jsonb := '[]'::jsonb;
   seen_ids text[] := '{}';
 begin
-  if jsonb_typeof(raw) <> 'object' or jsonb_typeof(raw->'id') <> 'string'
-     or jsonb_typeof(raw->'ply') <> 'number' or jsonb_typeof(raw->'sfen') <> 'string'
+  if jsonb_typeof(raw) <> 'object' or not (raw ? 'id') or jsonb_typeof(raw->'id') <> 'string'
+     or not (raw ? 'ply') or jsonb_typeof(raw->'ply') <> 'number' or not (raw ? 'sfen')
+     or jsonb_typeof(raw->'sfen') <> 'string' or not (raw ? 'createdAt')
      or jsonb_typeof(raw->'createdAt') <> 'string' then
     raise exception 'invalid review point';
   end if;
@@ -162,7 +163,7 @@ begin
   if raw ? 'externalNotes' and jsonb_typeof(raw->'externalNotes') <> 'string' then raise exception 'invalid legacy text'; end if;
   if raw ? 'legacyNotes' and jsonb_typeof(raw->'legacyNotes') <> 'string' then raise exception 'invalid legacy text'; end if;
   if raw ? 'note' and jsonb_typeof(raw->'note') <> 'string' then raise exception 'invalid note'; end if;
-  if raw ? 'reason' and raw->>'reason' not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then
+  if raw ? 'reason' and (jsonb_typeof(raw->'reason') <> 'string' or raw->>'reason' not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他')) then
     raise exception 'invalid reason';
   end if;
   if raw ? 'ply' and ((raw->>'ply') !~ '^[0-9]+$' or (raw->>'ply')::numeric > 2147483647) then raise exception 'invalid ply'; end if;
@@ -204,7 +205,16 @@ immutable
 as $$
 declare point jsonb; points jsonb := '[]'::jsonb;
 begin
-  if jsonb_typeof(raw) <> 'object' or jsonb_typeof(raw->'reviewPoints') <> 'array' then raise exception 'invalid game'; end if;
+  if jsonb_typeof(raw) <> 'object' or not (raw ? 'id') or jsonb_typeof(raw->'id') <> 'string'
+    or not (raw ? 'title') or jsonb_typeof(raw->'title') <> 'string'
+    or not (raw ? 'sourceFormat') or jsonb_typeof(raw->'sourceFormat') <> 'string'
+    or not (raw ? 'sourceText') or jsonb_typeof(raw->'sourceText') <> 'string'
+    or not (raw ? 'initialSfen') or jsonb_typeof(raw->'initialSfen') <> 'string'
+    or not (raw ? 'sfens') or jsonb_typeof(raw->'sfens') <> 'array'
+    or not (raw ? 'moves') or jsonb_typeof(raw->'moves') <> 'array'
+    or not (raw ? 'canonicalHash') or jsonb_typeof(raw->'canonicalHash') <> 'string'
+    or not (raw ? 'createdAt') or jsonb_typeof(raw->'createdAt') <> 'string'
+    or not (raw ? 'reviewPoints') or jsonb_typeof(raw->'reviewPoints') <> 'array' then raise exception 'invalid game'; end if;
   if raw ? 'perspective' and (jsonb_typeof(raw->'perspective') <> 'string'
     or raw->>'perspective' not in ('sente', 'gote', 'spectator')) then raise exception 'invalid perspective'; end if;
   for point in select value from jsonb_array_elements(raw->'reviewPoints') loop
@@ -328,6 +338,15 @@ begin
       if point_id is null or point_id = any(seen_points) then diagnostics := diagnostics || jsonb_build_array('duplicate_or_missing_point_id'); else seen_points := array_append(seen_points, point_id); end if;
       category := case when jsonb_typeof(point->'category') = 'string' then point->>'category' else null end;
       if point ? 'reason' and coalesce(reason, '') not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
+      if exists (select 1 from jsonb_each(point) field where field.key = any(array['thinking', 'tag', 'candidates', 'opponentResponse', 'nextConsideration', 'externalNotes', 'legacyNotes', 'note']) and jsonb_typeof(field.value) <> 'string') then
+        diagnostics := diagnostics || jsonb_build_array('invalid_review_text');
+      end if;
+      if point ? 'issueTags' and jsonb_typeof(point->'issueTags') <> 'array' then
+        diagnostics := diagnostics || jsonb_build_array('invalid_issue_tags');
+      elsif point ? 'issueTags' and exists (select 1 from jsonb_array_elements(point->'issueTags') tag where jsonb_typeof(tag) <> 'string'
+        or tag #>> '{}' not in ('序盤', '攻守判斷', '候選手', '王的安全', '駒的活用', '手筋', '寄せ・詰棋')) then
+        diagnostics := diagnostics || jsonb_build_array('invalid_issue_tags');
+      end if;
       if point->>'ply' is null or (point->>'ply') !~ '^[0-9]+$' then diagnostics := diagnostics || jsonb_build_array('invalid_ply'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') <> 'array' then diagnostics := diagnostics || jsonb_build_array('malformed_recommendations'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') = 'array' then
