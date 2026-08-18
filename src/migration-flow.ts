@@ -105,6 +105,7 @@ export async function executeMigration(
   if (!confirmed) throw new MigrationFlowError("confirmation_required");
   const expected = countData(preparation.data);
   const migration = await client.migrate(preparation.sourceHash);
+  if (migration.status !== "migrated") throw new MigrationFlowError("migrate_failed");
   if (migration.source_hash !== preparation.sourceHash) throw new MigrationFlowError("migrate_source_hash_mismatch");
   sameCounts(expected, migration.counts, "migrate_count_mismatch");
   const exported = await client.export();

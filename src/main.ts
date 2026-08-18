@@ -378,11 +378,13 @@ async function startMigrationAudit(): Promise<void> {
 async function runMigration(): Promise<void> {
   if (!migrationPreparation || migrationBusy) return;
   const userId = activeUser?.id;
+  const preparation = migrationPreparation;
   const confirmation = document.querySelector<HTMLInputElement>("#migration-confirm");
   if (!confirmation?.checked) { migrationErrorMessage = "請先勾選明確確認。"; renderMigration(); return; }
   migrationBusy = true; renderMigration();
   try {
-    const proof = await executeMigration(createNormalizedMigrationClient(supabase), migrationPreparation, true);
+    if (!activeUser || activeUser.id !== userId) return;
+    const proof = await executeMigration(createNormalizedMigrationClient(supabase), preparation, true);
     if (activeUser?.id !== userId) return;
     migrationProof = proof;
   } catch (error) { migrationErrorMessage = migrationError(error); }

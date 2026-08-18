@@ -67,6 +67,13 @@ describe("Phase B migration flow", () => {
     await expect(executeMigration(client, preparation, true)).rejects.toThrow("migrate_source_hash_mismatch");
   });
 
+  it("rejects a failed migration response before export or verify", async () => {
+    const { client, preparation } = await prepared();
+    client.migrateResult = { status: "failed", source_hash: preparation.sourceHash, counts: { games: 1, points: 0, recommendations: 0 } };
+    await expect(executeMigration(client, preparation, true)).rejects.toThrow("migrate_failed");
+    expect(client.verifyCalls).toBe(0);
+  });
+
   it("rejects export parse and target hash failures", async () => {
     const { client, preparation } = await prepared();
     client.exported = { schemaVersion: 3, exportedAt: "", data: {} } as never;
