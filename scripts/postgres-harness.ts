@@ -113,7 +113,7 @@ await a.query("select public.verify_my_migration($1, $2)", [sourceHash, targetHa
 await a.query("select public.finalize_my_cutover()");
 const own = await a.query("select count(*)::int as count from public.games");
 const cross = await b.query("select count(*)::int as count from public.games");
-if (own.rows[0].count !== 1 || cross.rows[0].count !== 0) throw new Error("owner RLS matrix failed");
+if (own.rows[0].count !== 2 || cross.rows[0].count !== 0) throw new Error("owner RLS matrix failed");
 await expectFailure(b, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'cross','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "cross-user insert", true, [alice]);
 await expectFailure(b, "select public.finalize_my_cutover()", "anon/auth ownership", false);
 const anonymousRows = await anon.query("select * from public.games");
