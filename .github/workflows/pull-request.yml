@@ -10,6 +10,19 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shogi_review
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shogi_review"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,6 +35,15 @@ jobs:
       - run: npm run build
       - run: npm run test:coverage
       - run: npm run test:e2e
+      - name: Run real PostgreSQL migration harness
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: shogi_review
+          CI: true
+        run: npm run test:postgres
       - name: Upload browser evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
