@@ -149,6 +149,18 @@ if (retainedLegacy.rows[0].count !== 1) throw new Error("legacy backup row was n
 const own = await a.query("select count(*)::int as count from public.games");
 const cross = await b.query("select count(*)::int as count from public.games");
 if (own.rows[0].count !== 2 || cross.rows[0].count !== 0) throw new Error("owner RLS matrix failed");
+await a.query("insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'crud-game','CRUD','KIF','x','x',array['x'],array[]::text[],'crud','x')", [alice]);
+await a.query("insert into public.review_points(user_id,id,game_id,ply,sfen,reason,created_at_text) values ($1,'crud-point','crud-game',0,'x','其他','x')", [alice]);
+await a.query("insert into public.recommended_moves(user_id,id,point_id,move,sort_order) values ($1,'crud-rec','crud-point','７六歩',0)", [alice]);
+const updated = await a.query("update public.games set title = 'CRUD updated', version = version + 1 where user_id = $1 and id = 'crud-game' and version = 1 returning version", [alice]);
+if (updated.rowCount !== 1 || updated.rows[0].version !== 2) throw new Error("normalized CAS update failed");
+const staleUpdate = await a.query("update public.games set title = 'stale' where user_id = $1 and id = 'crud-game' and version = 1 returning id", [alice]);
+if (staleUpdate.rowCount !== 0) throw new Error("stale normalized update unexpectedly succeeded");
+const independent = await a.query("update public.games set title = 'independent', version = version + 1 where user_id = $1 and id = 'game-2' and version = 1 returning id", [alice]);
+if (independent.rowCount !== 1) throw new Error("independent normalized update conflicted");
+await a.query("delete from public.games where user_id = $1 and id = 'crud-game' and version = 2", [alice]);
+const cascaded = await a.query("select (select count(*) from public.review_points where id = 'crud-point')::int + (select count(*) from public.recommended_moves where id = 'crud-rec')::int as count");
+if (cascaded.rows[0].count !== 0) throw new Error("normalized game delete did not cascade");
 await expectFailure(b, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'cross','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "cross-user insert", "row-level security", [alice]);
 const anonymousRows = await anon.query("select * from public.games");
 if (anonymousRows.rowCount !== 0) throw new Error("anonymous RLS select exposed normalized rows");
