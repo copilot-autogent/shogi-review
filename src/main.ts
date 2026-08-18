@@ -9,8 +9,10 @@ import { dialogInitialFocus } from "./dialog-focus.js";
 import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js";
 import { AuthTransitionGate, drainLatestAuthTransitions, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 import { buildReviewViewModel, findReviewEntry, parseReviewRoute, renderReviewPage, reviewEntries, reviewRoute, type ReviewEntry, type ReviewState } from "./review-page.js";
-import { createNormalizedMigrationClient, type AuditResult, type MigrationStatus } from "./normalized.js";
+import { createNormalizedMigrationClient, semanticSourceHash, type AuditResult, type MigrationStatus } from "./normalized.js";
 import { executeMigration, prepareMigration, reenterVerifiedMigration, type MigrationPreparation, type MigrationProof } from "./migration-flow.js";
+import { assertKnownWritableAuthority, LocalStorageAuthorityCache, resolveAuthority, type AuthoritySnapshot } from "./authority.js";
+import { IndexedDbNormalizedCache, SupabaseNormalizedRuntime } from "./normalized-runtime.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -55,6 +57,10 @@ let migrationStatus: MigrationStatus | null | undefined;
 let migrationBusy = false;
 let migrationAuditResult: AuditResult | undefined;
 let migrationErrorMessage = "";
+let authority: AuthoritySnapshot | null = null;
+let normalizedRuntime: SupabaseNormalizedRuntime | null = null;
+const normalizedCache = new IndexedDbNormalizedCache();
+const authorityCache = new LocalStorageAuthorityCache();
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
@@ -74,7 +80,7 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 const autosync = new AutoSyncEngine({
-  identity: () => activeUser && !profileTransition && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
+  identity: () => activeUser && authority?.authority !== "normalized" && !profileTransition && !profileLoadFailed && !pendingConflict && !pendingGuestImport ? { uid: activeUser.id, profile: activeProfile, generation: profileGeneration } : null,
   load: () => Promise.resolve(globalThis.structuredClone(data)),
   save: async (next) => {
     const profile = activeProfile; const uid = activeUser?.id; const generation = profileGeneration;
@@ -341,12 +347,49 @@ function renderMigration(): void {
   const preparation = migrationPreparation;
   const audit = preparation?.audit ?? migrationAuditResult;
   const counts = preparation ? countSummary(preparation.data) : formatAuditCounts(audit?.counts);
-  const proof = migrationProof ? `<section class="panel" data-migration-proof><h2>驗證完成</h2><p>status=verified</p><dl><dt>source hash</dt><dd><code>${esc(migrationProof.sourceHash)}</code></dd><dt>target hash</dt><dd><code>${esc(migrationProof.targetHash)}</code></dd><dt>games / review points / recommendations</dt><dd>${migrationProof.games} / ${migrationProof.points} / ${migrationProof.recommendations}</dd></dl><p class="warning">legacy remains authoritative；本階段不會切換讀寫來源。</p></section>` : "";
-  app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1><section class="panel"><p>此頁只供已登入帳號使用。先讀取目前的 legacy user_state，產生本機安全備份並完成稽核；不會上傳備份，也不會切換資料來源。</p><div class="actions"><button id="migration-audit" ${migrationBusy ? "disabled" : ""}>開始稽核與備份</button>${preparation ? `<button class="secondary" id="migration-download">下載 schema-v3 安全備份</button>` : ""}</div>${audit ? `<div class="backup-gate"><h2>稽核結果</h2><p>status=${audit.ok ? "ok" : "rejected"}</p><p>games / review points / recommendations: ${counts}</p><p>問題代碼：${audit.issues.length ? audit.issues.map(esc).join(", ") : "無"}</p></div>` : ""}${preparation && !migrationProof ? `<label class="check"><input id="migration-confirm" type="checkbox">我已確認備份可下載，並同意只在所有 parity 檢查通過後驗證遷移。</label><button id="migration-run" ${migrationBusy ? "disabled" : ""}>確認並驗證遷移</button>` : ""}<p id="migration-error" class="error" role="alert">${esc(migrationErrorMessage)}</p></section>${proof}</main>`;
+  const proof = migrationProof ? `<section class="panel" data-migration-proof><h2>驗證完成</h2><p>status=verified</p><dl><dt>source hash</dt><dd><code>${esc(migrationProof.sourceHash)}</code></dd><dt>target hash</dt><dd><code>${esc(migrationProof.targetHash)}</code></dd><dt>games / review points / recommendations</dt><dd>${migrationProof.games} / ${migrationProof.points} / ${migrationProof.recommendations}</dd></dl><p class="warning">legacy remains authoritative；本階段不會切換讀寫來源。</p><label class="check"><input id="migration-finalize-confirm" type="checkbox">我確認要將此帳號切換至正規化雲端資料，並同意先重新檢查 legacy 未變更。</label><button id="migration-finalize" ${migrationBusy ? "disabled" : ""}>確認並切換此帳號</button></section>` : "";
+  app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1><section class="panel"><p>此頁只供已登入帳號使用。先讀取目前的 legacy user_state，產生本機安全備份並完成稽核；未按下切換前不會變更資料來源。</p><div class="actions"><button id="migration-audit" ${migrationBusy ? "disabled" : ""}>開始稽核與備份</button>${preparation ? `<button class="secondary" id="migration-download">下載 schema-v3 安全備份</button>` : ""}</div>${audit ? `<div class="backup-gate"><h2>稽核結果</h2><p>status=${audit.ok ? "ok" : "rejected"}</p><p>games / review points / recommendations: ${counts}</p><p>問題代碼：${audit.issues.length ? audit.issues.map(esc).join(", ") : "無"}</p></div>` : ""}${preparation && !migrationProof ? `<label class="check"><input id="migration-confirm" type="checkbox">我已確認備份可下載，並同意只在所有 parity 檢查通過後驗證遷移。</label><button id="migration-run" ${migrationBusy ? "disabled" : ""}>確認並驗證遷移</button>` : ""}<p id="migration-error" class="error" role="alert">${esc(migrationErrorMessage)}</p></section>${proof}</main>`;
   bindCommon();
   document.querySelector("#migration-audit")?.addEventListener("click", () => void startMigrationAudit());
   document.querySelector("#migration-download")?.addEventListener("click", () => { if (preparation) downloadMigrationBackup(preparation.legacyBackup); });
   document.querySelector("#migration-run")?.addEventListener("click", () => void runMigration());
+  document.querySelector("#migration-finalize")?.addEventListener("click", () => void finalizeCutover());
+}
+
+async function finalizeCutover(): Promise<void> {
+  if (!activeUser || !migrationProof || migrationBusy) return;
+  const confirmation = document.querySelector<HTMLInputElement>("#migration-finalize-confirm");
+  if (!confirmation?.checked || !window.confirm("這是此帳號的雲端資料來源切換。確認要繼續嗎？")) return;
+  const userId = activeUser.id;
+  const generation = profileGeneration;
+  migrationBusy = true;
+  migrationErrorMessage = "";
+  renderMigration();
+  try {
+    const client = createNormalizedMigrationClient(supabase);
+    const legacy = await client.readLegacy();
+    if (!legacy) throw new Error("legacy snapshot unavailable");
+    const currentHash = await semanticSourceHash(JSON.stringify(legacy.payload));
+    if (currentHash !== migrationProof.sourceHash) throw new Error("legacy changed; Phase B must rerun before finalization.");
+    const status = await client.readMigration();
+    if (status?.status !== "verified") throw new Error("migration is no longer verified; Phase B must rerun.");
+    if (activeUser?.id !== userId || profileGeneration !== generation || profileTransition) throw new Error("帳號身分已變更，已取消切換。");
+    const result = await client.finalize();
+    if (result.status !== "finalized") throw new Error("cutover finalization was not confirmed.");
+    if (activeUser?.id !== userId || profileGeneration !== generation || profileTransition) throw new Error("帳號身分已變更，切換結果未套用到畫面。");
+    authority = await resolveAuthority({ userId, online: true, readStatus: () => client.readMigration(), cache: authorityCache });
+    normalizedRuntime = new SupabaseNormalizedRuntime(supabase, userId, normalizedCache);
+    data = await normalizedRuntime.load();
+    migrationStatus = await client.readMigration();
+    migrationProof = undefined;
+    migrationPreparation = undefined;
+    migrationBusy = false;
+    render();
+  } catch (error) {
+    migrationBusy = false;
+    migrationErrorMessage = error instanceof Error ? error.message : "切換未完成。";
+    renderMigration();
+  }
 }
 function countSummary(value: AppData): string {
   const points = value.games.reduce((total, game) => total + game.reviewPoints.length, 0);
@@ -404,6 +447,17 @@ function bindCommon(): void {
   }));
   document.querySelectorAll<HTMLElement>("[data-rename]").forEach((el) => el.addEventListener("click", () => openDestructive("rename-game", el.dataset.rename)));
   document.querySelectorAll<HTMLElement>("[data-game-delete]").forEach((el) => el.addEventListener("click", () => openDestructive("delete-game", el.dataset.gameDelete)));
+  const disabled = Boolean(activeUser && (!authority || authority.authority === "unknown" || authority.readOnly));
+  if (disabled) {
+    document.querySelectorAll<HTMLButtonElement>("#import, #point-form button[type=submit], [data-add-recommendation], [data-remove-recommendation], [data-rename], [data-game-delete], [data-delete], #backup, [data-dialog-submit], [data-dialog-backup]").forEach((control) => {
+      control.disabled = true;
+      control.title = "目前離線或無法確認資料來源；重新連線後才能修改。";
+    });
+    const main = document.querySelector("main");
+    if (main && !main.querySelector("[data-authority-warning]")) {
+      main.insertAdjacentHTML("afterbegin", `<p class="warning" role="status" data-authority-warning>目前只能檢視：${authority?.authority === "unknown" ? "無法確認帳號資料來源。" : "目前離線，已停用所有修改、匯入、刪除與還原操作。"}請重新連線後再試。</p>`);
+    }
+  }
   updateSyncStatus(syncStatus, syncMessage);
 }
 function openDestructive(kind: "delete-point" | "delete-game" | "rename-game" | "clear-guest" | "remove-profile" | "conflict" | "guest-import", id?: string): void {
@@ -448,7 +502,28 @@ function closeDialog(): void { if (dialogBusy) return; document.querySelector("[
 async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: string): Promise<void> {
   if (dialogBusy || profileTransition) return; const submit = document.querySelector<HTMLButtonElement>("[data-dialog-submit]"); dialogBusy = true; if (submit) submit.disabled = true;
   try {
-    if (kind === "rename-game") { const game = data.games.find((item) => item.id === id); const title = document.querySelector<HTMLInputElement>("#dialog-input")?.value.trim() ?? ""; const perspective = document.querySelector<HTMLSelectElement>("#dialog-perspective")?.value as Perspective | undefined; if (!game || !title || !perspective || !PERSPECTIVES.includes(perspective)) throw new Error("棋局名稱與執棋方不可為空白。"); const previous = { title: game.title, perspective: game.perspective }; game.title = title; game.perspective = perspective; temporaryFlip = { gameId: game.id, flipped: defaultOrientation(game) === "flipped" }; try { await persist(); } catch (error) { game.title = previous.title; game.perspective = previous.perspective; throw error; } }
+    if (kind === "rename-game") {
+      const game = data.games.find((item) => item.id === id);
+      const title = document.querySelector<HTMLInputElement>("#dialog-input")?.value.trim() ?? "";
+      const perspective = document.querySelector<HTMLSelectElement>("#dialog-perspective")?.value as Perspective | undefined;
+      if (!game || !title || !perspective || !PERSPECTIVES.includes(perspective)) throw new Error("棋局名稱與執棋方不可為空白。");
+      const previous = { title: game.title, perspective: game.perspective };
+      game.title = title;
+      game.perspective = perspective;
+      temporaryFlip = { gameId: game.id, flipped: defaultOrientation(game) === "flipped" };
+      try {
+        if (normalizedRuntime && authority?.authority === "normalized") {
+          await normalizedRuntime.updateGame(game);
+          data = await normalizedRuntime.load();
+        } else {
+          await persist();
+        }
+      } catch (error) {
+        game.title = previous.title;
+        game.perspective = previous.perspective;
+        throw error;
+      }
+    }
     if (kind === "delete-point") await deletePoint(id);
     if (kind === "delete-game") await deleteGame(id);
     if (kind === "clear-guest") { await repo.deleteProfile("guest"); data = { games: [] }; }
@@ -479,13 +554,110 @@ async function submitDialog(kind: Parameters<typeof openDestructive>[0], id?: st
 function generateBackup(): boolean { try { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(createBackup(data), null, 2)], { type: "application/json" })); link.download = "shogi-review-backup.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true; } catch (error) { showError(error); return false; } }
 async function importText(): Promise<void> { updateImportDraft(); try { await addGame(importDraft.source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
 async function importFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const source = decodeRecordBytes(new Uint8Array(await file.arrayBuffer())); importDraft = { ...importDraft, title: file.name, format: detectFormat(source, file.name), source }; await addGame(source, importDraft.format, importDraft.title, importDraft.perspective); } catch (error) { showError(error); } }
-async function addGame(source: string, format: InputFormat, title: string, perspective: Perspective = "spectator"): Promise<void> { assertWritable(); const game = parseGame(source, format, title); game.perspective = perspective; const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash); if (!existing) { const previous = data.games; data.games = [...previous, game]; try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; } } else if (existing.perspective !== perspective) { const previous = existing.perspective; existing.perspective = perspective; try { await persist(); } catch (error) { if (!profileTransition) existing.perspective = previous; throw error; } } importDraft = { title: "", format: "KIF", source: "", perspective: "spectator" }; location.hash = gameHash((existing ?? game).id, 0); render(); }
-async function savePoint(event: Event, game: Game): Promise<void> { assertWritable(); const form = event.currentTarget as HTMLFormElement; if (!form.reportValidity()) return; event.preventDefault(); const values = new FormData(form); const reason = String(values.get("reason") ?? ""); if (!REASONS.includes(reason as Reason)) return; const old = game.reviewPoints.find((item) => item.ply === selectedPly); const ids = values.getAll("recommendedMoveId").map(String); const moves = values.getAll("recommendedMove").map(String); const comments = values.getAll("recommendedComment").map(String); let recommendedMoves; try { recommendedMoves = normalizeRecommendedMoves(ids.map((id, index) => ({ id, move: moves[index] ?? "", comment: comments[index] ?? "" }))); } catch (error) { showError(error); return; } const point: ReviewPoint = old ? { ...old, ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), ...(recommendedMoves ? { recommendedMoves } : {}) } : { id: uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), createdAt: new Date().toISOString(), ...(recommendedMoves ? { recommendedMoves } : {}) }; if (!recommendedMoves) delete point.recommendedMoves; const previous = game.reviewPoints; game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply); try { await persist(); render(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; render(); showError(error); } }
+async function addGame(source: string, format: InputFormat, title: string, perspective: Perspective = "spectator"): Promise<void> {
+  assertWritable();
+  const game = parseGame(source, format, title);
+  game.perspective = perspective;
+  const existing = data.games.find((item) => item.canonicalHash === game.canonicalHash);
+  if (!existing && normalizedRuntime && authority?.authority === "normalized") {
+    await normalizedRuntime.createGame(game);
+    data = await normalizedRuntime.load();
+  } else if (!existing) {
+    const previous = data.games;
+    data.games = [...previous, game];
+    try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; }
+  } else if (existing.perspective !== perspective) {
+    const previous = existing.perspective;
+    if (normalizedRuntime && authority?.authority === "normalized") {
+      existing.perspective = perspective;
+      await normalizedRuntime.updateGame(existing);
+      data = await normalizedRuntime.load();
+    } else {
+      existing.perspective = perspective;
+      try { await persist(); } catch (error) { if (!profileTransition) existing.perspective = previous; throw error; }
+    }
+  }
+  importDraft = { title: "", format: "KIF", source: "", perspective: "spectator" };
+  location.hash = gameHash((existing ?? game).id, 0);
+  render();
+}
+async function savePoint(event: Event, game: Game): Promise<void> {
+  assertWritable();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  event.preventDefault();
+  const values = new FormData(form);
+  const reason = String(values.get("reason") ?? "");
+  if (!REASONS.includes(reason as Reason)) return;
+  const old = game.reviewPoints.find((item) => item.ply === selectedPly);
+  const ids = values.getAll("recommendedMoveId").map(String);
+  const moves = values.getAll("recommendedMove").map(String);
+  const comments = values.getAll("recommendedComment").map(String);
+  let recommendedMoves;
+  try { recommendedMoves = normalizeRecommendedMoves(ids.map((id, index) => ({ id, move: moves[index] ?? "", comment: comments[index] ?? "" }))); }
+  catch (error) { showError(error); return; }
+  const point: ReviewPoint = old
+    ? { ...old, ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), ...(recommendedMoves ? { recommendedMoves } : {}) }
+    : { id: uid("point"), ply: selectedPly, sfen: game.sfens[selectedPly]!, reason: reason as Reason, issueTags: values.getAll("issueTags").filter((tag): tag is IssueTag => ISSUE_TAGS.includes(tag as IssueTag)), note: text(values.get("note")), externalNotes: text(values.get("externalNotes")), createdAt: new Date().toISOString(), ...(recommendedMoves ? { recommendedMoves } : {}) };
+  if (!recommendedMoves) delete point.recommendedMoves;
+  const previous = game.reviewPoints;
+  if (normalizedRuntime && authority?.authority === "normalized") {
+    if (old) {
+      await normalizedRuntime.updatePoint(point, game.id);
+      await normalizedRuntime.syncRecommendations(point.id, old.recommendedMoves ?? [], point.recommendedMoves ?? []);
+    } else {
+      await normalizedRuntime.createPoint(game.id, point);
+    }
+    data = await normalizedRuntime.load();
+    render();
+    return;
+  }
+  game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
+  try { await persist(); render(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; render(); showError(error); }
+}
 function text(value: FormDataEntryValue | null): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
-async function deletePoint(id?: string): Promise<void> { assertWritable(); const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id)); if (!game) return; const previous = game.reviewPoints; game.reviewPoints = previous.filter((point) => point.id !== id); try { await persist(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; throw error; } }
-async function deleteGame(id?: string): Promise<void> { assertWritable(); const index = data.games.findIndex((item) => item.id === id); if (index < 0) return; const previous = data.games; data.games = previous.filter((item) => item.id !== id); try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; } location.hash = "#/games"; }
-async function persist(): Promise<void> { assertWritable(); const identity = currentPersistenceIdentity(); if (!identity) throw new Error("尚未完成帳號資料載入。"); localDataVersion += 1; await repo.saveProfile(identity.profile, data); if (!identityIsCurrent(identity)) throw new Error("帳號身分已變更，未儲存變更。"); if (pendingConflict) autosync.invalidate(); else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); } }
-async function restoreFile(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
+async function deletePoint(id?: string): Promise<void> {
+  assertWritable();
+  const game = data.games.find((item) => item.reviewPoints.some((point) => point.id === id));
+  if (!game) return;
+  const point = game.reviewPoints.find((item) => item.id === id);
+  if (!point) return;
+  if (normalizedRuntime && authority?.authority === "normalized") {
+    await normalizedRuntime.deletePoint(point.id);
+    data = await normalizedRuntime.load();
+    return;
+  }
+  const previous = game.reviewPoints;
+  game.reviewPoints = previous.filter((item) => item.id !== id);
+  try { await persist(); } catch (error) { if (!profileTransition) game.reviewPoints = previous; throw error; }
+}
+async function deleteGame(id?: string): Promise<void> {
+  assertWritable();
+  const index = data.games.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  if (normalizedRuntime && authority?.authority === "normalized") {
+    await normalizedRuntime.deleteGame(id!);
+    data = await normalizedRuntime.load();
+    location.hash = "#/games";
+    return;
+  }
+  const previous = data.games;
+  data.games = previous.filter((item) => item.id !== id);
+  try { await persist(); } catch (error) { if (!profileTransition) data.games = previous; throw error; }
+  location.hash = "#/games";
+}
+async function persist(): Promise<void> {
+  assertWritable();
+  if (authority?.authority === "normalized") throw new Error("正規化帳號必須使用逐列雲端修改。");
+  const identity = currentPersistenceIdentity();
+  if (!identity) throw new Error("尚未完成帳號資料載入。");
+  localDataVersion += 1;
+  await repo.saveProfile(identity.profile, data);
+  if (!identityIsCurrent(identity)) throw new Error("帳號身分已變更，未儲存變更。");
+  if (pendingConflict) autosync.invalidate();
+  else if (activeUser && !profileLoadFailed) { updateSyncStatus("尚未同步"); autosync.schedule(); }
+}
+async function restoreFile(event: Event): Promise<void> { assertWritable(); const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); openRestoreDialog(restored); } catch (error) { showError(error); } }
 function openRestoreDialog(restored: AppData): void { dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; app!.insertAdjacentHTML("beforeend", `<div class="dialog-backdrop" data-dialog><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1"><h2 id="dialog-title">還原備份？</h2><p>即將完整取代目前資料：${restored.games.length} 局棋、${restored.games.reduce((total, game) => total + game.reviewPoints.length, 0)} 個複盤局面。</p><p class="warning">這是目前登入帳號的本機分支；若雲端較新，同步會停在衝突處理，不會覆蓋雲端。</p><div class="actions dialog-actions"><button data-dialog-cancel class="secondary">取消</button><button data-dialog-submit>還原</button></div></section></div>`); document.querySelector("[data-dialog-cancel]")?.addEventListener("click", closeDialog); document.querySelector("[data-dialog-submit]")?.addEventListener("click", async () => { if (profileTransition) return; const previous = data; try { data = restored; await persist(); closeDialog(); render(); } catch (error) { if (!profileTransition) data = previous; showError(error); } }); document.querySelector("[data-dialog] .dialog")?.setAttribute("aria-describedby", "dialog-title"); document.body.classList.add("dialog-lock"); const cancel = document.querySelector<HTMLElement>("[data-dialog] [data-dialog-cancel]"); if (cancel) cancel.focus(); }
 async function startGoogleLoginFromUi(): Promise<void> { try { const error = await startGoogleLogin(supabase, window.localStorage, googleRedirectUrl(window.location.origin)); if (error) { syncMessage = error; render(); } } catch (error) { syncMessage = error instanceof Error ? error.message : "Google 登入啟動失敗，請重試。"; render(); } }
 async function removeLocalAccount(): Promise<void> {
@@ -588,6 +760,7 @@ function currentPersistenceIdentity(): { uid: string; profile: ProfileKey; gener
 }
 function assertWritable(): void {
   if (profileTransition) throw new Error("帳號資料載入中，暫時不能修改。");
+  if (activeUser && authority) assertKnownWritableAuthority(authority);
 }
 function identityIsCurrent(identity: { uid: string; profile: ProfileKey; generation: number }): boolean {
   const current = currentPersistenceIdentity();
@@ -671,6 +844,62 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   pendingConflict = undefined;
   const expectedUserId = profile.startsWith("user:") ? profile.slice("user:".length) : undefined;
   const isCurrent = () => profileTransition === token && desiredUserId === (token.user?.id);
+  if (expectedUserId) {
+    const resolved = await resolveAuthority({
+      userId: expectedUserId,
+      online: globalThis.navigator.onLine,
+      readStatus: async () => createNormalizedMigrationClient(supabase).readMigration(),
+      cache: authorityCache,
+    });
+    if (!isCurrent()) return "aborted";
+    authority = resolved;
+    if (resolved.authority === "normalized") {
+      normalizedRuntime = new SupabaseNormalizedRuntime(supabase, expectedUserId, normalizedCache);
+      let normalizedData: AppData | null;
+      if (resolved.online) {
+        try {
+          normalizedData = await normalizedRuntime.load();
+        } catch (error) {
+          normalizedData = await normalizedRuntime.loadCached();
+          if (normalizedData) {
+            authority = { ...resolved, online: false, readOnly: true };
+            syncMessage = error instanceof Error ? `已載入上次有效快取：${error.message}` : "已載入上次有效快取。";
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        normalizedData = await normalizedRuntime.loadCached();
+      }
+      if (!normalizedData) {
+        activeUser = token.user;
+        activeProfile = profile;
+        data = { games: [] };
+        profileLoadFailed = true;
+        startupError = "目前離線且沒有可用的雲端快取；重新連線後才能載入帳號資料。";
+        profileTransition = undefined;
+        return "activated";
+      }
+      activeUser = token.user;
+      activeProfile = profile;
+      data = normalizedData;
+      profileLoadFailed = false;
+      profileTransition = undefined;
+      return "activated";
+    }
+  } else {
+    authority = null;
+    normalizedRuntime = null;
+  }
+  if (expectedUserId && authority?.authority === "unknown") {
+    activeUser = token.user;
+    activeProfile = profile;
+    data = { games: [] };
+    profileLoadFailed = true;
+    startupError = "無法確認帳號資料來源；重新連線後才能載入帳號資料。";
+    profileTransition = undefined;
+    return "activated";
+  }
   const loaded = await loadProfileIfCurrent(() => repo.loadProfile(profile), isCurrent);
   if (!loaded) return "aborted";
   if (loaded.migrated) {
@@ -692,6 +921,8 @@ function beginProfileTransition(user: TransitionUser | null): ProfileTransition 
   const token = { generation: ++profileGeneration, profile: user ? `user:${user.id}` as ProfileKey : "guest", user };
   desiredUserId = user?.id;
   profileTransition = token;
+  authority = null;
+  normalizedRuntime = null;
   activeUser = null;
   activeProfile = "guest";
   data = { games: [] };
@@ -719,7 +950,7 @@ async function bootstrap(): Promise<void> {
     updateSyncStatus("離線／同步失敗", "本機資料載入失敗；已停用同步。");
   }
   render();
-  if (activeUser && !profileLoadFailed) { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); }
+  if (activeUser && !profileLoadFailed && authority?.authority !== "normalized") { await prepareAccountProfile(activeUser.id); void autosync.reconcile(); }
 }
 void bootstrap();
 function processAuthSession(session: Session | null): void {
@@ -752,7 +983,7 @@ function processAuthSession(session: Session | null): void {
             render();
             if (activeUser) {
               await prepareAccountProfile(activeUser.id, () => profileGeneration === current.generation && !profileTransition);
-              if (profileGeneration === current.generation && !profileTransition) void autosync.reconcile();
+              if (profileGeneration === current.generation && !profileTransition && authority?.authority !== "normalized") void autosync.reconcile();
             }
           }
         },

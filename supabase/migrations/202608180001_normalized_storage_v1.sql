@@ -119,9 +119,12 @@ begin
     end if;
     return old;
   end if;
-  if exists (
+  if (tg_op = 'UPDATE' and exists (
     select 1 from public.user_migrations
-    where user_id in (old.user_id, new.user_id) and status = 'finalized'
+    where user_id = old.user_id and status = 'finalized'
+  )) or exists (
+    select 1 from public.user_migrations
+    where user_id = new.user_id and status = 'finalized'
   ) then
     raise exception 'legacy user_state writes are disabled after normalized cutover';
   end if;
