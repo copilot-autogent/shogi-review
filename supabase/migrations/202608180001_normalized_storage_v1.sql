@@ -297,25 +297,26 @@ begin
   select jsonb_build_object(
     'schemaVersion', 3,
     'exportedAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    'data', jsonb_build_object('games', coalesce(jsonb_agg(
+    'data', jsonb_build_object('games', coalesce(jsonb_agg((
       jsonb_build_object('id', g.id, 'title', g.title, 'sourceFormat', g.source_format, 'sourceText', g.source_text,
         'initialSfen', g.initial_sfen, 'sfens', to_jsonb(g.sfens), 'moves', to_jsonb(g.moves),
         'canonicalHash', g.canonical_hash, 'createdAt', g.created_at_text,
-        'reviewPoints', (select coalesce(jsonb_agg(
+        'reviewPoints', (select coalesce(jsonb_agg((
           jsonb_build_object('id', p.id, 'ply', p.ply, 'sfen', p.sfen, 'reason', p.reason, 'issueTags', to_jsonb(p.issue_tags),
             'createdAt', p.created_at_text)
             || case when p.notes is not null then jsonb_build_object('note', p.notes) else '{}'::jsonb end
             || case when p.external_notes is not null then jsonb_build_object('externalNotes', p.external_notes) else '{}'::jsonb end
             || case when p.legacy_notes is not null then jsonb_build_object('legacyNotes', p.legacy_notes) else '{}'::jsonb end
             || case when exists (select 1 from public.recommended_moves r where r.user_id = uid and r.point_id = p.id)
-              then jsonb_build_object('recommendedMoves', (select jsonb_agg(jsonb_build_object('id', r.id, 'move', r.move)
+              then jsonb_build_object('recommendedMoves', (select jsonb_agg((
+                jsonb_build_object('id', r.id, 'move', r.move)
                 || case when r.comment is not null then jsonb_build_object('comment', r.comment) else '{}'::jsonb end
-                order by r.sort_order, r.id) from public.recommended_moves r where r.user_id = uid and r.point_id = p.id))
+              ) order by r.sort_order, r.id) from public.recommended_moves r where r.user_id = uid and r.point_id = p.id))
               else '{}'::jsonb end
           ) order by p.ply, p.id), '[]'::jsonb) from public.review_points p where p.user_id = uid and p.game_id = g.id)
         )
         || case when g.perspective_present then jsonb_build_object('perspective', g.perspective) else '{}'::jsonb end
-      order by g.created_at_text, g.id), '[]'::jsonb))
+      ) order by g.created_at_text, g.id), '[]'::jsonb))
   ) into result from public.games g where g.user_id = uid;
   return result;
 end
