@@ -81,7 +81,10 @@ export function createNormalizedMigrationClient(client: SupabaseClient): Normali
   };
   return {
     async readLegacy() {
-      const { data, error } = await client.from("user_state").select("user_id,payload,revision,updated_at").maybeSingle();
+      const { data: user, error: userError } = await client.auth.getUser();
+      if (userError) throw userError;
+      if (!user.user) throw new Error("authenticated user required");
+      const { data, error } = await client.from("user_state").select("user_id,payload,revision,updated_at").eq("user_id", user.user.id).maybeSingle();
       if (error) throw error;
       return data as LegacyStateRow | null;
     },
@@ -94,7 +97,10 @@ export function createNormalizedMigrationClient(client: SupabaseClient): Normali
     export: () => rpc<Backup>("export_my_state_v3"),
     verify: (sourceHash, targetHash) => rpc("verify_my_migration", { source_hash: sourceHash, target_hash: targetHash }),
     async readMigration() {
-      const { data, error } = await client.from("user_migrations").select("status,source_hash,target_hash,counts").maybeSingle();
+      const { data: user, error: userError } = await client.auth.getUser();
+      if (userError) throw userError;
+      if (!user.user) throw new Error("authenticated user required");
+      const { data, error } = await client.from("user_migrations").select("status,source_hash,target_hash,counts").eq("user_id", user.user.id).maybeSingle();
       if (error) throw error;
       return data as MigrationStatus | null;
     },

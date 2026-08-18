@@ -340,7 +340,7 @@ function renderMigration(): void {
   }
   const preparation = migrationPreparation;
   const audit = preparation?.audit ?? migrationAuditResult;
-  const counts = preparation ? countSummary(preparation.data) : "";
+  const counts = preparation ? countSummary(preparation.data) : formatAuditCounts(audit?.counts);
   const proof = migrationProof ? `<section class="panel" data-migration-proof><h2>驗證完成</h2><p>status=verified</p><dl><dt>source hash</dt><dd><code>${esc(migrationProof.sourceHash)}</code></dd><dt>target hash</dt><dd><code>${esc(migrationProof.targetHash)}</code></dd><dt>games / review points / recommendations</dt><dd>${migrationProof.games} / ${migrationProof.points} / ${migrationProof.recommendations}</dd></dl><p class="warning">legacy remains authoritative；本階段不會切換讀寫來源。</p></section>` : "";
   app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1><section class="panel"><p>此頁只供已登入帳號使用。先讀取目前的 legacy user_state，產生本機安全備份並完成稽核；不會上傳備份，也不會切換資料來源。</p><div class="actions"><button id="migration-audit" ${migrationBusy ? "disabled" : ""}>開始稽核與備份</button>${preparation ? `<button class="secondary" id="migration-download">下載 schema-v3 安全備份</button>` : ""}</div>${audit ? `<div class="backup-gate"><h2>稽核結果</h2><p>status=${audit.ok ? "ok" : "rejected"}</p><p>games / review points / recommendations: ${counts}</p><p>問題代碼：${audit.issues.length ? audit.issues.map(esc).join(", ") : "無"}</p></div>` : ""}${preparation && !migrationProof ? `<label class="check"><input id="migration-confirm" type="checkbox">我已確認備份可下載，並同意只在所有 parity 檢查通過後驗證遷移。</label><button id="migration-run" ${migrationBusy ? "disabled" : ""}>確認並驗證遷移</button>` : ""}<p id="migration-error" class="error" role="alert">${esc(migrationErrorMessage)}</p></section>${proof}</main>`;
   bindCommon();
@@ -353,30 +353,38 @@ function countSummary(value: AppData): string {
   const recommendations = value.games.reduce((total, game) => total + game.reviewPoints.reduce((count, point) => count + (point.recommendedMoves?.length ?? 0), 0), 0);
   return `${value.games.length} / ${points} / ${recommendations}`;
 }
+function formatAuditCounts(value: Record<string, number> | undefined): string {
+  return `${value?.games ?? 0} / ${value?.points ?? value?.review_points ?? value?.reviewPoints ?? 0} / ${value?.recommendations ?? value?.recommended_moves ?? value?.recommendedMoves ?? 0}`;
+}
 async function startMigrationAudit(): Promise<void> {
   if (!activeUser || migrationBusy) return;
+  const userId = activeUser.id;
+  migrationPreparation = undefined; migrationProof = undefined; migrationStatus = undefined; migrationAuditResult = undefined; migrationErrorMessage = "";
   migrationBusy = true; renderMigration();
   try {
     const client = createNormalizedMigrationClient(supabase);
-    migrationAuditResult = undefined; migrationErrorMessage = "";
     migrationPreparation = await prepareMigration(client);
+    if (activeUser?.id !== userId) return;
     migrationStatus = await client.readMigration();
-    if (migrationStatus?.status === "verified") migrationProof = await reenterVerifiedMigration(client, migrationStatus);
+    if (migrationStatus?.status === "verified") migrationProof = await reenterVerifiedMigration(client, migrationStatus, migrationPreparation.sourceHash);
   } catch (error) {
     migrationPreparation = undefined; migrationProof = undefined;
     if (error instanceof Error && error.message === "audit_rejected") {
-      migrationAuditResult = { ok: false, issues: (error as Error & { issues?: string[] }).issues ?? [] };
+      migrationAuditResult = (error as Error & { audit?: AuditResult }).audit;
     }
     migrationErrorMessage = migrationError(error);
   } finally { migrationBusy = false; renderMigration(); }
 }
 async function runMigration(): Promise<void> {
   if (!migrationPreparation || migrationBusy) return;
+  const userId = activeUser?.id;
   const confirmation = document.querySelector<HTMLInputElement>("#migration-confirm");
   if (!confirmation?.checked) { migrationErrorMessage = "請先勾選明確確認。"; renderMigration(); return; }
   migrationBusy = true; renderMigration();
   try {
-    migrationProof = await executeMigration(createNormalizedMigrationClient(supabase), migrationPreparation, true);
+    const proof = await executeMigration(createNormalizedMigrationClient(supabase), migrationPreparation, true);
+    if (activeUser?.id !== userId) return;
+    migrationProof = proof;
   } catch (error) { migrationErrorMessage = migrationError(error); }
   finally { migrationBusy = false; renderMigration(); }
 }
@@ -508,6 +516,11 @@ async function removeLocalAccount(): Promise<void> {
     activeProfile = "guest";
     pendingConflict = undefined;
     pendingGuestImport = undefined;
+    migrationPreparation = undefined;
+    migrationProof = undefined;
+    migrationStatus = undefined;
+    migrationAuditResult = undefined;
+    migrationErrorMessage = "";
     profileLoadFailed = false;
     data = { games: [] };
     selectedGame = undefined;

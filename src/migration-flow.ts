@@ -26,7 +26,7 @@ export interface MigrationProof extends MigrationCounts {
 }
 
 export class MigrationFlowError extends Error {
-  constructor(public readonly code: string, public readonly issues: string[] = []) {
+  constructor(public readonly code: string, public readonly issues: string[] = [], public readonly audit?: AuditResult) {
     super(code);
   }
 }
@@ -43,10 +43,14 @@ export function countData(data: AppData): MigrationCounts {
 }
 
 function countsOf(value: Record<string, number> | undefined): MigrationCounts {
+  if (!value) throw new MigrationFlowError("missing_counts");
+  const points = value.points ?? value.review_points ?? value.reviewPoints;
+  const recommendations = value.recommendations ?? value.recommended_moves ?? value.recommendedMoves;
+  if (value.games === undefined || points === undefined || recommendations === undefined) throw new MigrationFlowError("missing_counts");
   return {
-    games: value?.games ?? 0,
-    points: value?.points ?? value?.review_points ?? value?.reviewPoints ?? 0,
-    recommendations: value?.recommendations ?? value?.recommended_moves ?? value?.recommendedMoves ?? 0,
+    games: value.games,
+    points,
+    recommendations,
   };
 }
 
@@ -67,7 +71,8 @@ export async function prepareMigration(client: NormalizedMigrationClient): Promi
     throw new MigrationFlowError("legacy_parse_failed");
   }
   const audit = await client.audit();
-  if (audit.ok !== true || audit.issues.length !== 0) throw new MigrationFlowError("audit_rejected", audit.issues);
+  const issues = Array.isArray(audit.issues) ? audit.issues.filter((issue): issue is string => typeof issue === "string") : [];
+  if (audit.ok !== true || issues.length !== 0) throw new MigrationFlowError("audit_rejected", issues, { ...audit, issues });
   const sourceHash = await payloadHash(data);
   return { sourceHash, data, audit, legacyBackup: JSON.stringify({ schemaVersion: 3, exportedAt: new Date().toISOString(), data }) };
 }
@@ -112,9 +117,11 @@ export async function executeMigration(
 export async function reenterVerifiedMigration(
   client: NormalizedMigrationClient,
   status: MigrationStatus,
+  sourceHash: string,
 ): Promise<MigrationProof> {
   if (status.status !== "verified") throw new MigrationFlowError("migration_not_verified");
   if (!status.source_hash || !status.target_hash) throw new MigrationFlowError("verified_proof_incomplete");
+  if (sourceHash !== status.source_hash) throw new MigrationFlowError("verified_source_changed");
   const exported = await client.export();
   let data: AppData;
   try {

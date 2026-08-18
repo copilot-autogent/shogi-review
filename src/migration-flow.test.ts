@@ -97,8 +97,22 @@ describe("Phase B migration flow", () => {
     const proof = await executeMigration(client, preparation, true);
     client.migration = { status: "verified", source_hash: proof.sourceHash, target_hash: proof.targetHash, counts: { games: proof.games, points: proof.points, recommendations: proof.recommendations } };
     client.verifyCalls = 0;
-    const again = await reenterVerifiedMigration(client, client.migration!);
+    const again = await reenterVerifiedMigration(client, client.migration!, proof.sourceHash);
     expect(again).toEqual(proof);
     expect(client.verifyCalls).toBe(0);
+  });
+
+  it("rejects re-entry when the freshly read source hash changed", async () => {
+    const { client, preparation } = await prepared();
+    const proof = await executeMigration(client, preparation, true);
+    client.migration = { status: "verified", source_hash: proof.sourceHash, target_hash: proof.targetHash, counts: { games: proof.games, points: proof.points, recommendations: proof.recommendations } };
+    await expect(reenterVerifiedMigration(client, client.migration, "changed")).rejects.toThrow("verified_source_changed");
+  });
+
+  it("rejects verified proof with missing counts", async () => {
+    const { client, preparation } = await prepared();
+    const proof = await executeMigration(client, preparation, true);
+    client.migration = { status: "verified", source_hash: proof.sourceHash, target_hash: proof.targetHash };
+    await expect(reenterVerifiedMigration(client, client.migration, proof.sourceHash)).rejects.toThrow("missing_counts");
   });
 });
