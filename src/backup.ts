@@ -53,7 +53,10 @@ function migratePoint(raw: unknown): ReviewPoint {
   const category = typeof raw.category === "string" ? raw.category : "";
   const mapped = CATEGORY_MIGRATION[category] ?? { reason: "其他" as const };
   if (category && !CATEGORY_MIGRATION[category]) legacy.push(`舊分類：${category}`);
-  const reason = REASONS.includes(raw.reason as Reason) ? raw.reason as Reason : mapped.reason;
+  if (typeof raw.reason !== "undefined" && !REASONS.includes(raw.reason as Reason)) {
+    throw new Error("備份含有無效複盤原因，未套用任何變更。");
+  }
+  const reason = typeof raw.reason === "undefined" ? mapped.reason : raw.reason as Reason;
   if (typeof raw.issueTags !== "undefined" && (!Array.isArray(raw.issueTags) || raw.issueTags.some((tag) => !ISSUE_TAGS.includes(tag as IssueTag)))) {
     throw new Error("備份含有無效問題標籤，未套用任何變更。");
   }
@@ -63,7 +66,7 @@ function migratePoint(raw: unknown): ReviewPoint {
   const recommendedMoves = normalizeRecommendedMoves(raw.recommendedMoves);
   return {
     id: string(raw.id), ply: number(raw.ply), sfen: string(raw.sfen), reason, issueTags: tags,
-    note, externalNotes: text(raw.externalNotes), legacyNotes: legacy.length ? legacy.join("\n") : text(raw.legacyNotes),
+    note, externalNotes: text(raw.externalNotes),     legacyNotes: [legacy.join("\n"), text(raw.legacyNotes)].filter((value): value is string => Boolean(value)).join("\n") || undefined,
     createdAt: string(raw.createdAt),
     ...(recommendedMoves ? { recommendedMoves } : {}),
   };

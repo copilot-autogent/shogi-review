@@ -162,8 +162,11 @@ begin
   if raw ? 'externalNotes' and jsonb_typeof(raw->'externalNotes') <> 'string' then raise exception 'invalid legacy text'; end if;
   if raw ? 'legacyNotes' and jsonb_typeof(raw->'legacyNotes') <> 'string' then raise exception 'invalid legacy text'; end if;
   if raw ? 'note' and jsonb_typeof(raw->'note') <> 'string' then raise exception 'invalid note'; end if;
-  reason := case when raw->>'reason' in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他')
-    then raw->>'reason' else mapped_reason end;
+  if raw ? 'reason' and raw->>'reason' not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then
+    raise exception 'invalid reason';
+  end if;
+  if raw ? 'ply' and ((raw->>'ply') !~ '^[0-9]+$' or (raw->>'ply')::numeric > 2147483647) then raise exception 'invalid ply'; end if;
+  reason := case when raw ? 'reason' then raw->>'reason' else mapped_reason end;
   if raw ? 'recommendedMoves' then
     if jsonb_typeof(raw->'recommendedMoves') <> 'array' then raise exception 'invalid recommendations'; end if;
     for item in select value from jsonb_array_elements(raw->'recommendedMoves') loop
@@ -187,8 +190,8 @@ begin
       when raw ? 'nextConsideration' and btrim(raw->>'nextConsideration') <> '' then jsonb_build_object('note', raw->>'nextConsideration')
       else '{}'::jsonb end
     || case when raw ? 'externalNotes' and btrim(raw->>'externalNotes') <> '' then jsonb_build_object('externalNotes', raw->>'externalNotes') else '{}'::jsonb end
-    || case when cardinality(legacy) > 0 then jsonb_build_object('legacyNotes', array_to_string(legacy, E'\n'))
-      when raw ? 'legacyNotes' and btrim(raw->>'legacyNotes') <> '' then jsonb_build_object('legacyNotes', raw->>'legacyNotes') else '{}'::jsonb end
+    || case when cardinality(legacy) > 0 or (raw ? 'legacyNotes' and btrim(raw->>'legacyNotes') <> '') then
+      jsonb_build_object('legacyNotes', concat_ws(E'\n', nullif(array_to_string(legacy, E'\n'), ''), nullif(raw->>'legacyNotes', ''))) else '{}'::jsonb end
     || case when mapped_tag is not null and not tags @> jsonb_build_array(mapped_tag) then jsonb_build_object('issueTags', tags || jsonb_build_array(mapped_tag)) else '{}'::jsonb end
     || case when jsonb_array_length(normalized_recommendations) > 0 then jsonb_build_object('recommendedMoves', normalized_recommendations) else '{}'::jsonb end;
 end
@@ -324,8 +327,7 @@ begin
       reason := point->>'reason';
       if point_id is null or point_id = any(seen_points) then diagnostics := diagnostics || jsonb_build_array('duplicate_or_missing_point_id'); else seen_points := array_append(seen_points, point_id); end if;
       category := case when jsonb_typeof(point->'category') = 'string' then point->>'category' else null end;
-      if coalesce(reason, '') not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他')
-        and category is null then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
+      if point ? 'reason' and coalesce(reason, '') not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
       if point->>'ply' is null or (point->>'ply') !~ '^[0-9]+$' then diagnostics := diagnostics || jsonb_build_array('invalid_ply'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') <> 'array' then diagnostics := diagnostics || jsonb_build_array('malformed_recommendations'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') = 'array' then
@@ -417,7 +419,8 @@ begin
 exception when others then
   insert into public.user_migrations(user_id, migration_version, status, source_payload, source_hash, error, source_revision)
   values (uid, 1, 'failed', coalesce(legacy_payload, '{}'::jsonb), coalesce(source_hash, ''), sqlerrm, legacy_revision)
-  on conflict (user_id) do update set status = 'failed', error = sqlerrm;
+  on conflict (user_id) do update set status = 'failed', source_payload = excluded.source_payload,
+    source_hash = excluded.source_hash, source_revision = excluded.source_revision, error = sqlerrm;
   return jsonb_build_object('status', 'failed', 'error', sqlerrm);
 end
 $$;
@@ -518,6 +521,7 @@ begin
   select us.payload, us.revision into live_payload, live_revision from public.user_state as us where us.user_id = uid for update;
   if not found then raise exception 'legacy user_state row is missing'; end if;
   if live_revision <> expected_revision or live_payload is distinct from current.source_payload then
+    update public.user_migrations set status = 'failed', error = 'legacy payload changed after snapshot' where user_id = uid;
     return jsonb_build_object('status', 'failed', 'error', 'legacy payload changed after snapshot', 'revision', live_revision);
   end if;
   update public.user_state set payload = rollback_my_cutover.payload, revision = revision + 1 where user_id = uid and revision = expected_revision;

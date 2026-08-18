@@ -47,7 +47,7 @@ const sourceJson = JSON.stringify(source);
 const sourceHash = await payloadHash(parseBackup(sourceJson));
 const legacyPoint = {
   id: "point-legacy", ply: 0, sfen: parsedGame.sfens[0], category: "戰術",
-  thinking: "先看候選手", nextConsideration: "保留下一步", issueTags: [],
+  thinking: "先看候選手", nextConsideration: "保留下一步", legacyNotes: "既有備註", issueTags: [],
   createdAt: "2026-08-17T12:34:56.789+09:00", recommendedMoves: [{ id: "legacy-rec", move: " ７六歩 ", comment: " 候選 " }],
 };
 const legacyGame = { ...parsedGame, id: "legacy-game", title: "Legacy v1/v2", sourceText, createdAt: "2026-08-18T01:02:03.004-04:00", reviewPoints: [legacyPoint] };
@@ -57,7 +57,7 @@ for (const [version, json] of [[1, v1Json], [2, v2Json]] as const) {
   const migrated = parseBackup(json);
   if (migrated.games[0].reviewPoints[0].reason !== "計算錯誤"
     || migrated.games[0].reviewPoints[0].note !== "保留下一步"
-    || migrated.games[0].reviewPoints[0].legacyNotes !== "當時想法：先看候選手"
+    || migrated.games[0].reviewPoints[0].legacyNotes !== "當時想法：先看候選手\n既有備註"
     || migrated.games[0].reviewPoints[0].recommendedMoves?.[0].comment !== "候選") {
     throw new Error(`schema-v${version} JS fixture did not migrate`);
   }
