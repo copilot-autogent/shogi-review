@@ -120,6 +120,7 @@ if (anonymousRows.rowCount !== 0) throw new Error("anonymous RLS select exposed 
 await expectFailure(anon, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'anon','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "anonymous insert", "row-level security", [alice]);
 
 // A writer holding the legacy row lock must serialize before finalize and be observed.
+await a.query("select public.rollback_my_cutover($1::jsonb, $2)", [sourceJson, sourceHash]);
 await a.query("select public.migrate_my_state_v1($1)", [sourceHash]);
 await a.query("select public.verify_my_migration($1, $2)", [sourceHash, targetHash]);
 await a.query("begin");
