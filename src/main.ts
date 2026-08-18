@@ -570,8 +570,13 @@ async function addGame(source: string, format: InputFormat, title: string, persp
     const previous = existing.perspective;
     if (normalizedRuntime && authority?.authority === "normalized") {
       existing.perspective = perspective;
-      await normalizedRuntime.updateGame(existing);
-      data = await normalizedRuntime.load();
+      try {
+        await normalizedRuntime.updateGame(existing);
+        data = await normalizedRuntime.load();
+      } catch (error) {
+        existing.perspective = previous;
+        throw error;
+      }
     } else {
       existing.perspective = perspective;
       try { await persist(); } catch (error) { if (!profileTransition) existing.perspective = previous; throw error; }
@@ -602,14 +607,20 @@ async function savePoint(event: Event, game: Game): Promise<void> {
   if (!recommendedMoves) delete point.recommendedMoves;
   const previous = game.reviewPoints;
   if (normalizedRuntime && authority?.authority === "normalized") {
-    if (old) {
-      await normalizedRuntime.updatePoint(point, game.id);
-      await normalizedRuntime.syncRecommendations(point.id, old.recommendedMoves ?? [], point.recommendedMoves ?? []);
-    } else {
-      await normalizedRuntime.createPoint(game.id, point);
+    try {
+      if (old) {
+        await normalizedRuntime.updatePoint(point, game.id);
+        await normalizedRuntime.syncRecommendations(point.id, old.recommendedMoves ?? [], point.recommendedMoves ?? []);
+      } else {
+        await normalizedRuntime.createPoint(game.id, point);
+      }
+      data = await normalizedRuntime.load();
+      render();
+    } catch (error) {
+      data = await normalizedRuntime.load();
+      render();
+      showError(error);
     }
-    data = await normalizedRuntime.load();
-    render();
     return;
   }
   game.reviewPoints = [...previous.filter((item) => item.ply !== selectedPly), point].sort((a, b) => a.ply - b.ply);
@@ -845,12 +856,24 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   const expectedUserId = profile.startsWith("user:") ? profile.slice("user:".length) : undefined;
   const isCurrent = () => profileTransition === token && desiredUserId === (token.user?.id);
   if (expectedUserId) {
-    const resolved = await resolveAuthority({
-      userId: expectedUserId,
-      online: globalThis.navigator.onLine,
-      readStatus: async () => createNormalizedMigrationClient(supabase).readMigration(),
-      cache: authorityCache,
-    });
+    let resolved: AuthoritySnapshot;
+    try {
+      resolved = await resolveAuthority({
+        userId: expectedUserId,
+        online: globalThis.navigator.onLine,
+        readStatus: async () => createNormalizedMigrationClient(supabase).readMigration(),
+        cache: authorityCache,
+      });
+    } catch (error) {
+      activeUser = token.user;
+      activeProfile = profile;
+      data = { games: [] };
+      authority = { userId: expectedUserId, authority: "unknown", online: true, readOnly: true, status: null };
+      profileLoadFailed = true;
+      startupError = error instanceof Error ? `無法確認帳號資料來源：${error.message}` : "無法確認帳號資料來源。";
+      profileTransition = undefined;
+      return "activated";
+    }
     if (!isCurrent()) return "aborted";
     authority = resolved;
     if (resolved.authority === "normalized") {
@@ -875,6 +898,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
         activeUser = token.user;
         activeProfile = profile;
         data = { games: [] };
+        authority = { ...resolved, readOnly: true };
         profileLoadFailed = true;
         startupError = "目前離線且沒有可用的雲端快取；重新連線後才能載入帳號資料。";
         profileTransition = undefined;
@@ -900,6 +924,32 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
     profileTransition = undefined;
     return "activated";
   }
+  window.addEventListener("offline", () => {
+    if (authority?.authority !== "normalized") return;
+    authority = { ...authority, online: false, readOnly: true };
+    updateSyncStatus("離線／同步失敗", "目前只能檢視正規化快取；重新連線後才能修改。");
+    render();
+  });
+  window.addEventListener("online", () => {
+    const user = activeUser;
+    if (!user || profileTransition) return;
+    const token = beginProfileTransition(user);
+    void activateProfile(token.profile, token).then(async (result) => {
+      if (result !== "activated" || profileTransition) return;
+      render();
+      if (activeUser && authority?.authority !== "normalized") {
+        await prepareAccountProfile(activeUser.id);
+        if (!profileTransition) void autosync.reconcile();
+      }
+    }).catch((error) => {
+      if (profileTransition === token) {
+        profileLoadFailed = true;
+        startupError = error instanceof Error ? error.message : "重新連線後載入帳號資料失敗。";
+        profileTransition = undefined;
+        render();
+      }
+    });
+  });
   const loaded = await loadProfileIfCurrent(() => repo.loadProfile(profile), isCurrent);
   if (!loaded) return "aborted";
   if (loaded.migrated) {

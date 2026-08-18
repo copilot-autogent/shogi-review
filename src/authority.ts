@@ -12,7 +12,7 @@ export interface AuthoritySnapshot {
 
 export interface AuthorityCache {
   read(userId: string): MigrationStatus | null;
-  write(userId: string, status: MigrationStatus): void;
+  write(userId: string, status: MigrationStatus | null): void;
 }
 
 export interface AuthorityResolutionOptions {
@@ -32,7 +32,7 @@ export async function resolveAuthority(options: AuthorityResolutionOptions): Pro
   let status: MigrationStatus | null;
   if (options.online) {
     status = await options.readStatus();
-    options.cache.write(options.userId, status ?? { status: "migrated" });
+    options.cache.write(options.userId, status);
   } else {
     status = options.cache.read(options.userId);
   }
@@ -57,13 +57,14 @@ export class MemoryAuthorityCache implements AuthorityCache {
     const status = this.statuses.get(userId);
     return status ? globalThis.structuredClone(status) : null;
   }
-  write(userId: string, status: MigrationStatus): void {
-    this.statuses.set(userId, globalThis.structuredClone(status));
+  write(userId: string, status: MigrationStatus | null): void {
+    if (status) this.statuses.set(userId, globalThis.structuredClone(status));
+    else this.statuses.delete(userId);
   }
 }
 
 export class LocalStorageAuthorityCache implements AuthorityCache {
-  constructor(private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = window.localStorage) {}
+  constructor(private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = globalThis.localStorage) {}
   read(userId: string): MigrationStatus | null {
     const value = this.storage.getItem(`shogi-review-authority:${userId}`);
     if (!value) return null;
@@ -76,7 +77,9 @@ export class LocalStorageAuthorityCache implements AuthorityCache {
       return null;
     }
   }
-  write(userId: string, status: MigrationStatus): void {
-    this.storage.setItem(`shogi-review-authority:${userId}`, JSON.stringify(status));
+  write(userId: string, status: MigrationStatus | null): void {
+    const key = `shogi-review-authority:${userId}`;
+    if (status) this.storage.setItem(key, JSON.stringify(status));
+    else this.storage.removeItem(key);
   }
 }

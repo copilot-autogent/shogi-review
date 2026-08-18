@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { assertKnownWritableAuthority, MemoryAuthorityCache, resolveAuthority } from "./authority.js";
+import type { MigrationStatus } from "./normalized.js";
 
-const finalized = { status: "finalized", source_hash: "source", target_hash: "target" };
-const verified = { status: "verified", source_hash: "source", target_hash: "target" };
+const finalized: MigrationStatus = { status: "finalized", source_hash: "source", target_hash: "target" };
+const verified: MigrationStatus = { status: "verified", source_hash: "source", target_hash: "target" };
 
 describe("per-account authority resolution", () => {
   it.each([
@@ -34,5 +35,13 @@ describe("per-account authority resolution", () => {
     expect(result.authority).toBe("legacy");
     expect(result.readOnly).toBe(true);
     expect(() => assertKnownWritableAuthority(result)).toThrow("離線");
+  });
+
+  it("forgets a finalized cache entry when the online server reports no migration row", async () => {
+    const cache = new MemoryAuthorityCache();
+    cache.write("u1", finalized);
+    await resolveAuthority({ userId: "u1", online: true, readStatus: async () => null, cache });
+    const offline = await resolveAuthority({ userId: "u1", online: false, readStatus: async () => null, cache });
+    expect(offline.authority).toBe("unknown");
   });
 });

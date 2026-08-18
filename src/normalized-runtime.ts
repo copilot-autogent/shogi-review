@@ -189,7 +189,7 @@ export class SupabaseNormalizedRuntime {
       user_id: this.userId, id: game.id, title: game.title, source_format: game.sourceFormat, source_text: game.sourceText,
       initial_sfen: game.initialSfen, sfens: game.sfens, moves: game.moves, canonical_hash: game.canonicalHash,
       created_at_text: game.createdAt, perspective: game.perspective ?? null, perspective_present: game.perspective !== undefined,
-      source_order: game.createdAt ? Date.parse(game.createdAt) : 0,
+      source_order: Number.isFinite(Date.parse(game.createdAt)) ? Date.parse(game.createdAt) : 0,
     }).select("*");
     if (result.error) throw result.error;
     assertOne(result.data as Row[] | null, "normalized game insert was not confirmed");
