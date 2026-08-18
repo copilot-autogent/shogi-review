@@ -223,7 +223,16 @@ export class SupabaseNormalizedRuntime {
     }).select("*");
     if (result.error) throw result.error;
     assertOne(result.data as Row[] | null, "normalized review point insert was not confirmed");
-    for (const [sortOrder, recommendation] of (point.recommendedMoves ?? []).entries()) await this.createRecommendation(point.id, recommendation, sortOrder);
+    try {
+      for (const [sortOrder, recommendation] of (point.recommendedMoves ?? []).entries()) await this.createRecommendation(point.id, recommendation, sortOrder);
+    } catch (error) {
+      try {
+        await this.deletePoint(point.id, 1);
+      } catch (cleanupError) {
+        throw new Error("複盤局面匯入失敗，且清理部分資料也失敗。", { cause: cleanupError });
+      }
+      throw error;
+    }
   }
 
   async updatePoint(point: ReviewPoint, gameId: string, expectedVersion = this.version("review_points", point.id)): Promise<void> {
@@ -258,13 +267,17 @@ export class SupabaseNormalizedRuntime {
 
   async syncRecommendations(pointId: string, previous: readonly RecommendedMove[], next: readonly RecommendedMove[]): Promise<void> {
     const nextIds = new Set(next.map((item) => item.id));
-    for (const item of previous) {
-      if (!nextIds.has(item.id)) await this.deleteRecommendation(item.id);
-    }
-    for (const [sortOrder, item] of next.entries()) {
-      const old = previous.find((candidate) => candidate.id === item.id);
-      if (!old) await this.createRecommendation(pointId, item, sortOrder);
-      else await this.updateRecommendation(item, pointId, sortOrder);
+    try {
+      for (const item of previous) {
+        if (!nextIds.has(item.id)) await this.deleteRecommendation(item.id);
+      }
+      for (const [sortOrder, item] of next.entries()) {
+        const old = previous.find((candidate) => candidate.id === item.id);
+        if (!old) await this.createRecommendation(pointId, item, sortOrder);
+        else await this.updateRecommendation(item, pointId, sortOrder);
+      }
+    } catch (error) {
+      throw new Error("推薦手更新未完整套用；已停止後續修改，請重新載入確認目前狀態。", { cause: error });
     }
   }
 
