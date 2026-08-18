@@ -3,7 +3,7 @@ import tseslint from "@typescript-eslint/eslint-plugin";
 import parser from "@typescript-eslint/parser";
 
 export default [
-  { ignores: ["dist", "node_modules"] },
+  { ignores: ["dist", "node_modules", "scripts/postgres-harness.ts"] },
   eslint.configs.recommended,
   {
     files: ["**/*.ts"],
