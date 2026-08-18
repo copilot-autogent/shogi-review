@@ -861,6 +861,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   autosync.invalidate();
   pendingConflict = undefined;
   const expectedUserId = profile.startsWith("user:") ? profile.slice("user:".length) : undefined;
+  let resolvedMigrationStatus: MigrationStatus | null | undefined;
   const isCurrent = () => profileTransition === token && desiredUserId === (token.user?.id);
   if (expectedUserId) {
     let resolved: AuthoritySnapshot;
@@ -883,7 +884,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
     }
     if (!isCurrent()) return "aborted";
     authority = resolved;
-    migrationStatus = resolved.status;
+    resolvedMigrationStatus = resolved.status;
     if (resolved.authority === "normalized") {
       normalizedRuntime = new SupabaseNormalizedRuntime(supabase, expectedUserId, normalizedCache);
       let normalizedData: AppData | null;
@@ -915,6 +916,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
       activeUser = token.user;
       activeProfile = profile;
       data = normalizedData;
+      migrationStatus = resolvedMigrationStatus;
       profileLoadFailed = false;
       profileTransition = undefined;
       return "activated";
@@ -969,6 +971,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   activeUser = token.user;
   activeProfile = profile;
   data = loaded.data;
+  migrationStatus = resolvedMigrationStatus;
   syncMetadata = expectedUserId ? readMetadata(expectedUserId) : { hashVersion: 1 };
   profileLoadFailed = false;
   profileTransition = undefined;
@@ -982,6 +985,11 @@ function beginProfileTransition(user: TransitionUser | null): ProfileTransition 
   profileTransition = token;
   authority = null;
   normalizedRuntime = null;
+  migrationPreparation = undefined;
+  migrationProof = undefined;
+  migrationStatus = undefined;
+  migrationAuditResult = undefined;
+  migrationErrorMessage = "";
   activeUser = null;
   activeProfile = "guest";
   data = { games: [] };

@@ -44,4 +44,14 @@ describe("finalized migration status rendering", () => {
     expect(html).toContain("未提供");
     expect(html).toContain("0 / 0 / 0");
   });
+
+  it("rejects malformed server count values", () => {
+    const status = {
+      status: "finalized",
+      counts: { games: "<img src=x>", review_points: -1, recommended_moves: 1.5 },
+    } as unknown as Parameters<typeof renderFinalizedMigrationStatus>[0];
+    const html = renderFinalizedMigrationStatus(status, { games: [] });
+    expect(html).toContain("0 / 0 / 0");
+    expect(html).not.toContain("<img");
+  });
 });
