@@ -167,7 +167,7 @@ declare
   diagnostics jsonb := '[]'::jsonb;
   seen_games text[] := '{}';
   seen_points text[] := '{}';
-  seen_recommendations text[];
+  seen_recommendations text[] := '{}';
   game_id text;
   point_id text;
   reason text;
@@ -188,18 +188,17 @@ begin
     game_id := game->>'id';
     source_format := game->>'sourceFormat';
     if game_id is null or game_id = any(seen_games) then diagnostics := diagnostics || jsonb_build_array('duplicate_or_missing_game_id'); else seen_games := array_append(seen_games, game_id); end if;
-    if source_format not in ('KIF', 'KI2', 'CSA') then diagnostics := diagnostics || jsonb_build_array('invalid_source_format'); end if;
+    if coalesce(source_format, '') not in ('KIF', 'KI2', 'CSA') then diagnostics := diagnostics || jsonb_build_array('invalid_source_format'); end if;
     if game ? 'perspective' and game->>'perspective' not in ('sente', 'gote', 'spectator') then diagnostics := diagnostics || jsonb_build_array('invalid_perspective'); end if;
     if jsonb_typeof(game->'reviewPoints') <> 'array' then diagnostics := diagnostics || jsonb_build_array('malformed_review_points'); continue; end if;
     for point in select value from jsonb_array_elements(game->'reviewPoints') loop
       point_id := point->>'id';
       reason := point->>'reason';
       if point_id is null or point_id = any(seen_points) then diagnostics := diagnostics || jsonb_build_array('duplicate_or_missing_point_id'); else seen_points := array_append(seen_points, point_id); end if;
-      if reason not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
+      if coalesce(reason, '') not in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他') then diagnostics := diagnostics || jsonb_build_array('invalid_reason'); end if;
       if point->>'ply' is null or (point->>'ply') !~ '^[0-9]+$' then diagnostics := diagnostics || jsonb_build_array('invalid_ply'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') <> 'array' then diagnostics := diagnostics || jsonb_build_array('malformed_recommendations'); end if;
       if point ? 'recommendedMoves' and jsonb_typeof(point->'recommendedMoves') = 'array' then
-        seen_recommendations := '{}';
         for recommendation in select value from jsonb_array_elements(point->'recommendedMoves') loop
           if coalesce(recommendation->>'id', '') = '' or coalesce(recommendation->>'move', '') = ''
             or recommendation->>'id' = any(seen_recommendations) then diagnostics := diagnostics || jsonb_build_array('invalid_or_duplicate_recommendation'); end if;
@@ -236,6 +235,9 @@ begin
   if source_hash is null or source_hash = '' then raise exception 'source_hash is required'; end if;
   select payload into legacy_payload from public.user_state where user_id = uid for update;
   if not found then raise exception 'legacy user_state row is missing'; end if;
+  if exists (select 1 from public.user_migrations where user_id = uid and status = 'finalized') then
+    raise exception 'migration is finalized; normalized writes require export/manual rollback';
+  end if;
   if not (public.audit_my_state_v1()->>'ok')::boolean then raise exception 'legacy payload failed audit: %', public.audit_my_state_v1()->>'issues'; end if;
   delete from public.recommended_moves where user_id = uid;
   delete from public.review_points where user_id = uid;
@@ -279,7 +281,7 @@ exception when others then
   insert into public.user_migrations(user_id, migration_version, status, source_payload, source_hash, error)
   values (uid, 1, 'failed', coalesce(legacy_payload, '{}'::jsonb), coalesce(source_hash, ''), sqlerrm)
   on conflict (user_id) do update set status = 'failed', error = sqlerrm;
-  raise;
+  return jsonb_build_object('status', 'failed', 'error', sqlerrm);
 end
 $$;
 
@@ -372,6 +374,7 @@ begin
   select * into current from public.user_migrations where user_id = uid for update;
   if not found or current.status not in ('migrated', 'verified', 'finalized') then raise exception 'migration is not inside rollback window'; end if;
   if target_hash is null or target_hash <> current.source_hash then raise exception 'rollback hash mismatch'; end if;
+  if payload is distinct from current.source_payload then raise exception 'rollback payload does not match migration snapshot'; end if;
   update public.user_state set payload = rollback_my_cutover.payload, revision = revision + 1 where user_id = uid;
   if not found then raise exception 'legacy user_state row is missing'; end if;
   update public.user_migrations set status = 'rolled_back', rolled_back_at = now(), error = null where user_id = uid;

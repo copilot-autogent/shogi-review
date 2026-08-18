@@ -30,7 +30,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install chromium
+      - run: timeout 300s npx playwright install --with-deps chromium || npx playwright install chromium
       - run: npm run lint
       - run: npm run build
       - run: npm run test:coverage

@@ -119,15 +119,23 @@ export class SupabaseNormalizedRepository implements NormalizedRepository {
   async replaceReviewPoint(input: NormalizedMutation<NormalizedReviewPoint>): Promise<NormalizedReviewPoint> {
     const { data, error } = await this.client.from("review_points").update({
       game_id: input.value.gameId, ply: input.value.ply, sfen: input.value.sfen, reason: input.value.reason,
-      issue_tags: input.value.issueTags, notes: input.value.notes, created_at_text: input.value.createdAt,
+      issue_tags: input.value.issueTags, notes: input.value.notes, external_notes: input.value.externalNotes ?? null,
+      legacy_notes: input.value.legacyNotes ?? null, created_at_text: input.value.createdAt,
       version: input.expectedVersion + 1,
     }).eq("user_id", this.userId).eq("id", input.value.id).eq("version", input.expectedVersion).select("*");
     if (error) throw error;
     const row = assertExactlyOneVersionedRow(data, input.expectedVersion);
+    const recommendations = await this.client.from("recommended_moves").select("*")
+      .eq("user_id", this.userId).eq("point_id", input.value.id).order("sort_order").order("id");
+    if (recommendations.error) throw recommendations.error;
     return {
       id: row.id, gameId: row.game_id, ply: row.ply, sfen: row.sfen, reason: row.reason,
       issueTags: row.issue_tags, notes: row.notes, createdAt: row.created_at_text,
-      externalNotes: row.external_notes, legacyNotes: row.legacy_notes, recommendedMoves: [],
+      externalNotes: row.external_notes, legacyNotes: row.legacy_notes,
+      recommendedMoves: recommendations.data.map((recommendation) => ({
+        id: recommendation.id, pointId: recommendation.point_id, move: recommendation.move,
+        comment: recommendation.comment, sortOrder: recommendation.sort_order, version: recommendation.version,
+      })),
       version: row.version,
     };
   }

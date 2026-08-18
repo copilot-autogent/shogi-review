@@ -104,7 +104,7 @@ await a.query("update public.user_state set payload = $1 where user_id = $2", [s
 const audit = await a.query("select public.audit_my_state_v1() as result");
 if (!audit.rows[0].result.ok) throw new Error(`valid fixture failed audit: ${JSON.stringify(audit.rows[0].result)}`);
 await a.query("select public.migrate_my_state_v1($1)", [sourceHash]);
-await expectFailure(a, "select public.finalize_my_cutover()", "finalize before verified", false);
+await expectFailure(a, "select public.finalize_my_cutover()", "finalize before verified", "migration must be verified");
 const exported = (await a.query("select public.export_my_state_v3() as payload")).rows[0].payload;
 const exportedData = parseBackup(JSON.stringify(exported));
 if (canonicalData(exportedData) !== canonicalData(parseBackup(sourceJson))) throw new Error("SQL export is not JS semantic-parity exact");
@@ -114,11 +114,10 @@ await a.query("select public.finalize_my_cutover()");
 const own = await a.query("select count(*)::int as count from public.games");
 const cross = await b.query("select count(*)::int as count from public.games");
 if (own.rows[0].count !== 2 || cross.rows[0].count !== 0) throw new Error("owner RLS matrix failed");
-await expectFailure(b, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'cross','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "cross-user insert", true, [alice]);
-await expectFailure(b, "select public.finalize_my_cutover()", "anon/auth ownership", false);
+await expectFailure(b, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'cross','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "cross-user insert", "row-level security", [alice]);
 const anonymousRows = await anon.query("select * from public.games");
 if (anonymousRows.rowCount !== 0) throw new Error("anonymous RLS select exposed normalized rows");
-await expectFailure(anon, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'anon','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "anonymous insert", true, [alice]);
+await expectFailure(anon, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'anon','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "anonymous insert", "row-level security", [alice]);
 
 // A writer holding the legacy row lock must serialize before finalize and be observed.
 await a.query("select public.migrate_my_state_v1($1)", [sourceHash]);
@@ -128,7 +127,7 @@ await a.query("update public.user_state set payload = payload || jsonb_build_obj
 const blockedFinalize = a2.query("select public.finalize_my_cutover()");
 await new Promise((resolve) => setTimeout(resolve, 100));
 await a.query("commit");
-await expectFailurePromise(blockedFinalize, "concurrent writer vs finalize");
+await expectFailurePromise(blockedFinalize, "concurrent writer vs finalize", "legacy payload changed");
 
 const restored = JSON.stringify(source);
 await a.query("update public.user_state set payload = $1 where user_id = $2", [restored, alice]);
@@ -146,16 +145,23 @@ await a2.end();
 await anon.end();
 console.log("PostgreSQL Phase A harness passed: DDL idempotency, RLS, audit, migrate/export parity, versioned verification/finalize locking, concurrent writer serialization, rollback.");
 
-async function expectFailure(client: Client, sql: string, label: string, requireRls: boolean, values: unknown[] = []): Promise<void> {
+async function expectFailure(client: Client, sql: string, label: string, expected: string, values: unknown[] = []): Promise<void> {
   try {
-    const result = await client.query(sql, values);
-    if (requireRls && result.rowCount === 0) return;
+    await client.query(sql, values);
     throw new Error(`${label} unexpectedly succeeded`);
   } catch (error) {
     if (error instanceof Error && error.message === `${label} unexpectedly succeeded`) throw error;
+    if (!(error instanceof Error) || !error.message.toLowerCase().includes(expected.toLowerCase())) {
+      throw new Error(`${label} failed for an unexpected reason: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
-async function expectFailurePromise(promise: Promise<unknown>, label: string): Promise<void> {
+async function expectFailurePromise(promise: Promise<unknown>, label: string, expected: string): Promise<void> {
   try { await promise; throw new Error(`${label} unexpectedly succeeded`); }
-  catch (error) { if (error instanceof Error && error.message === `${label} unexpectedly succeeded`) throw error; }
+  catch (error) {
+    if (error instanceof Error && error.message === `${label} unexpectedly succeeded`) throw error;
+    if (!(error instanceof Error) || !error.message.toLowerCase().includes(expected.toLowerCase())) {
+      throw new Error(`${label} failed for an unexpected reason: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
