@@ -9,6 +9,7 @@ export const NORMALIZED_STORAGE = false;
 export interface NormalizedGame extends Omit<Game, "reviewPoints" | "perspective"> {
   perspective: Perspective | null;
   perspectivePresent: boolean;
+  sourceOrder: number;
   version: number;
 }
 export interface NormalizedReviewPoint extends Omit<ReviewPoint, "recommendedMoves" | "note"> {
@@ -16,6 +17,7 @@ export interface NormalizedReviewPoint extends Omit<ReviewPoint, "recommendedMov
   notes: string | null;
   recommendedMoves: NormalizedRecommendation[];
   version: number;
+  sourceOrder: number;
 }
 export interface NormalizedRecommendation {
   id: string;
@@ -77,7 +79,11 @@ export function createNormalizedMigrationClient(client: SupabaseClient, userId: 
       return data as LegacyStateRow | null;
     },
     audit: () => rpc<AuditResult>("audit_my_state_v1"),
-    migrate: (sourceHash) => rpc<MigrationResult>("migrate_my_state_v1", { source_hash: sourceHash }),
+    async migrate(sourceHash) {
+      const result = await rpc<MigrationResult>("migrate_my_state_v1", { source_hash: sourceHash });
+      if (result.status === "failed") throw new Error("normalized migration failed");
+      return result;
+    },
     export: () => rpc<Backup>("export_my_state_v3"),
     verify: (sourceHash, targetHash) => rpc("verify_my_migration", { source_hash: sourceHash, target_hash: targetHash }),
     finalize: () => rpc("finalize_my_cutover"),
@@ -112,7 +118,7 @@ export class SupabaseNormalizedRepository implements NormalizedRepository {
       id: row.id, title: row.title, sourceFormat: row.source_format, sourceText: row.source_text,
       initialSfen: row.initial_sfen, sfens: row.sfens, moves: row.moves, canonicalHash: row.canonical_hash,
       createdAt: row.created_at_text, perspective: row.perspective, perspectivePresent: row.perspective_present,
-      version: row.version,
+      sourceOrder: row.source_order, version: row.version,
     };
   }
 
@@ -136,7 +142,7 @@ export class SupabaseNormalizedRepository implements NormalizedRepository {
         id: recommendation.id, pointId: recommendation.point_id, move: recommendation.move,
         comment: recommendation.comment, sortOrder: recommendation.sort_order, version: recommendation.version,
       })),
-      version: row.version,
+      sourceOrder: row.source_order, version: row.version,
     };
   }
 

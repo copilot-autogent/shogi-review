@@ -23,6 +23,7 @@ create table if not exists public.games (
   moves text[] not null,
   canonical_hash text not null,
   created_at_text text not null,
+  source_order integer not null default 0,
   perspective text,
   perspective_present boolean not null default false,
   version integer not null default 1,
@@ -31,6 +32,7 @@ create table if not exists public.games (
   constraint games_perspective_check check (perspective is null or perspective in ('sente', 'gote', 'spectator')),
   constraint games_perspective_presence_check check (perspective_present or perspective is null),
   constraint games_version_check check (version > 0),
+  constraint games_source_order_check check (source_order >= 0),
   constraint games_text_check check (
     not public.normalized_v1_text_has_nul(title) and not public.normalized_v1_text_has_nul(source_text)
     and not public.normalized_v1_text_has_nul(initial_sfen) and not public.normalized_v1_text_has_nul(created_at_text)
@@ -49,6 +51,7 @@ create table if not exists public.review_points (
   external_notes text,
   legacy_notes text,
   created_at_text text not null,
+  source_order integer not null default 0,
   version integer not null default 1,
   primary key (user_id, id),
   unique (user_id, game_id, ply),
@@ -57,6 +60,7 @@ create table if not exists public.review_points (
   constraint review_points_reason_check check (reason in ('不知道怎麼走', '漏看對手的手', '計畫或方向錯誤', '計算錯誤', '終盤失誤', '時間不足', '想記住這個好手', '其他')),
   constraint review_points_tags_check check (issue_tags <@ array['序盤', '攻守判斷', '候選手', '王的安全', '駒的活用', '手筋', '寄せ・詰棋']::text[]),
   constraint review_points_version_check check (version > 0),
+  constraint review_points_source_order_check check (source_order >= 0),
   constraint review_points_text_check check (
     not public.normalized_v1_text_has_nul(sfen) and not public.normalized_v1_text_has_nul(created_at_text)
     and (notes is null or not public.normalized_v1_text_has_nul(notes))
@@ -125,6 +129,9 @@ drop policy if exists "normalized_user_migrations_owner" on public.user_migratio
 create policy "normalized_user_migrations_owner" on public.user_migrations
   for all using ((select auth.uid()) = user_id)
   with check ((select auth.uid()) = user_id);
+
+grant select, insert, update, delete on public.games, public.review_points, public.recommended_moves, public.user_migrations to authenticated;
+grant select on public.games, public.review_points, public.recommended_moves, public.user_migrations to anon;
 
 create or replace function public.normalized_v1_json_has_nul(value jsonb)
 returns boolean
@@ -227,6 +234,8 @@ declare
   game_count integer := 0;
   point_count integer := 0;
   recommendation_count integer := 0;
+  game_source_order integer;
+  point_source_order integer;
   migration public.user_migrations%rowtype;
   game_row_id text;
   point_row_id text;
@@ -242,21 +251,24 @@ begin
   delete from public.recommended_moves where user_id = uid;
   delete from public.review_points where user_id = uid;
   delete from public.games where user_id = uid;
-  for game in select value from jsonb_array_elements(public.normalized_v1_payload_games(legacy_payload)) loop
+  for game, game_source_order in
+    select value, ordinality - 1 from jsonb_array_elements(public.normalized_v1_payload_games(legacy_payload)) with ordinality as items(value, ordinality) loop
     game_row_id := game->>'id';
-    insert into public.games(user_id, id, title, source_format, source_text, initial_sfen, sfens, moves, canonical_hash, created_at_text, perspective, perspective_present)
+    insert into public.games(user_id, id, title, source_format, source_text, initial_sfen, sfens, moves, canonical_hash, created_at_text, source_order, perspective, perspective_present)
     values (uid, game_row_id, game->>'title', game->>'sourceFormat', game->>'sourceText', game->>'initialSfen',
       array(select jsonb_array_elements_text(game->'sfens')), array(select jsonb_array_elements_text(game->'moves')),
-      game->>'canonicalHash', game->>'createdAt', case when game ? 'perspective' then game->>'perspective' else null end, game ? 'perspective');
+      game->>'canonicalHash', game->>'createdAt', game_source_order,
+      case when game ? 'perspective' then game->>'perspective' else null end, game ? 'perspective');
     game_count := game_count + 1;
-    for point in select value from jsonb_array_elements(game->'reviewPoints') loop
+    for point, point_source_order in
+      select value, ordinality - 1 from jsonb_array_elements(game->'reviewPoints') with ordinality as items(value, ordinality) loop
       point_row_id := point->>'id';
-      insert into public.review_points(user_id, id, game_id, ply, sfen, reason, issue_tags, notes, external_notes, legacy_notes, created_at_text)
+      insert into public.review_points(user_id, id, game_id, ply, sfen, reason, issue_tags, notes, external_notes, legacy_notes, created_at_text, source_order)
       values (uid, point_row_id, game_row_id, (point->>'ply')::integer, point->>'sfen', point->>'reason',
         array(select jsonb_array_elements_text(coalesce(point->'issueTags', '[]'::jsonb))),
         case when point ? 'note' then point->>'note' else null end,
         case when point ? 'externalNotes' then point->>'externalNotes' else null end,
-        case when point ? 'legacyNotes' then point->>'legacyNotes' else null end, point->>'createdAt');
+        case when point ? 'legacyNotes' then point->>'legacyNotes' else null end, point->>'createdAt', point_source_order);
       point_count := point_count + 1;
       if jsonb_typeof(point->'recommendedMoves') = 'array' then
         for recommendation, recommendation_sort_order in
@@ -317,10 +329,10 @@ begin
                 || case when r.comment is not null then jsonb_build_object('comment', r.comment) else '{}'::jsonb end
               ) order by r.sort_order, r.id) from public.recommended_moves r where r.user_id = uid and r.point_id = p.id))
               else '{}'::jsonb end
-          ) order by p.ply, p.id), '[]'::jsonb) from public.review_points p where p.user_id = uid and p.game_id = g.id)
+          ) order by p.source_order, p.ply, p.id), '[]'::jsonb) from public.review_points p where p.user_id = uid and p.game_id = g.id)
         )
         || case when g.perspective_present then jsonb_build_object('perspective', g.perspective) else '{}'::jsonb end
-      ) order by g.created_at_text, g.id), '[]'::jsonb))
+      ) order by g.source_order, g.id), '[]'::jsonb))
   ) into result from public.games g where g.user_id = uid;
   return result;
 end
