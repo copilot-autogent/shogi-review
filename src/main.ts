@@ -783,7 +783,7 @@ function assertWritable(): void {
   if (activeUser && authority) assertKnownWritableAuthority(authority);
 }
 function handleOffline(): void {
-  if (activeUser && authority?.authority === "normalized") {
+  if (activeUser && authority) {
     authority = { ...authority, online: false, readOnly: true };
     updateSyncStatus("離線／同步失敗", offlineWriteMessage);
     render();
