@@ -796,9 +796,9 @@ function handleOnline(): void {
   void activateProfile(token.profile, token).then(async (result) => {
     if (result !== "activated" || profileTransition) return;
     render();
-    if (activeUser) {
+    if (activeUser && authority?.authority !== "normalized") {
       await prepareAccountProfile(activeUser.id, () => profileGeneration === token.generation && !profileTransition);
-      if (profileGeneration === token.generation && !profileTransition && authority?.authority !== "normalized") void autosync.reconcile();
+      if (profileGeneration === token.generation && !profileTransition) void autosync.reconcile();
     }
   }).catch((error) => {
     if (profileTransition === token) {
@@ -932,7 +932,6 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
           if (normalizedData) {
             authority = { ...resolved, online: false, readOnly: true };
             syncMessage = error instanceof Error ? `已載入上次有效快取：${error.message}` : "已載入上次有效快取。";
-            startupError = syncMessage;
           } else {
             throw error;
           }
