@@ -62,6 +62,8 @@ let authority: AuthoritySnapshot | null = null;
 let normalizedRuntime: SupabaseNormalizedRuntime | null = null;
 const normalizedCache = new IndexedDbNormalizedCache();
 const authorityCache = new LocalStorageAuthorityCache();
+const offlineWriteMessage = "目前離線；已停用雲端資料修改，重新連線後再試。";
+let networkHandlersRegistered = false;
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
@@ -462,7 +464,7 @@ function bindCommon(): void {
     });
     const main = document.querySelector("main");
     if (main && !main.querySelector("[data-authority-warning]")) {
-      main.insertAdjacentHTML("afterbegin", `<p class="warning" role="status" data-authority-warning>目前只能檢視：${authority?.authority === "unknown" ? "無法確認帳號資料來源。" : "目前離線，已停用所有修改、匯入、刪除與還原操作。"}請重新連線後再試。</p>`);
+      main.insertAdjacentHTML("afterbegin", `<p class="warning" role="status" data-authority-warning>${authority?.authority === "unknown" ? "目前只能檢視：無法確認帳號資料來源。請重新連線後再試。" : offlineWriteMessage}</p>`);
     }
   }
   updateSyncStatus(syncStatus, syncMessage);
@@ -780,6 +782,40 @@ function assertWritable(): void {
   if (profileTransition) throw new Error("帳號資料載入中，暫時不能修改。");
   if (activeUser && authority) assertKnownWritableAuthority(authority);
 }
+function handleOffline(): void {
+  if (activeUser && authority) {
+    authority = { ...authority, online: false, readOnly: true };
+    updateSyncStatus("離線／同步失敗", offlineWriteMessage);
+    render();
+  }
+}
+function handleOnline(): void {
+  const user = activeUser;
+  if (!user || profileTransition || !globalThis.navigator.onLine) return;
+  const token = beginProfileTransition(user);
+  void activateProfile(token.profile, token).then(async (result) => {
+    if (result !== "activated" || profileTransition) return;
+    render();
+    if (activeUser && authority?.authority !== "normalized") {
+      await prepareAccountProfile(activeUser.id, () => profileGeneration === token.generation && !profileTransition);
+      if (profileGeneration === token.generation && !profileTransition) void autosync.reconcile();
+    }
+  }).catch((error) => {
+    if (profileTransition === token) {
+      profileLoadFailed = true;
+      startupError = error instanceof Error ? error.message : "重新連線後載入帳號資料失敗。";
+      profileTransition = undefined;
+      render();
+    }
+  });
+}
+function registerNetworkHandlers(): void {
+  if (networkHandlersRegistered) return;
+  networkHandlersRegistered = true;
+  window.addEventListener("offline", handleOffline);
+  window.addEventListener("online", handleOnline);
+  window.addEventListener("pageshow", (event) => { if (event.persisted) (globalThis.navigator.onLine ? handleOnline : handleOffline)(); });
+}
 function identityIsCurrent(identity: { uid: string; profile: ProfileKey; generation: number }): boolean {
   const current = currentPersistenceIdentity();
   return Boolean(current && current.uid === identity.uid && current.profile === identity.profile && current.generation === identity.generation);
@@ -935,32 +971,6 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
     profileTransition = undefined;
     return "activated";
   }
-  window.addEventListener("offline", () => {
-    if (authority?.authority !== "normalized") return;
-    authority = { ...authority, online: false, readOnly: true };
-    updateSyncStatus("離線／同步失敗", "目前只能檢視正規化快取；重新連線後才能修改。");
-    render();
-  });
-  window.addEventListener("online", () => {
-    const user = activeUser;
-    if (!user || profileTransition) return;
-    const token = beginProfileTransition(user);
-    void activateProfile(token.profile, token).then(async (result) => {
-      if (result !== "activated" || profileTransition) return;
-      render();
-      if (activeUser && authority?.authority !== "normalized") {
-        await prepareAccountProfile(activeUser.id);
-        if (!profileTransition) void autosync.reconcile();
-      }
-    }).catch((error) => {
-      if (profileTransition === token) {
-        profileLoadFailed = true;
-        startupError = error instanceof Error ? error.message : "重新連線後載入帳號資料失敗。";
-        profileTransition = undefined;
-        render();
-      }
-    });
-  });
   const loaded = await loadProfileIfCurrent(() => repo.loadProfile(profile), isCurrent);
   if (!loaded) return "aborted";
   if (loaded.migrated) {
@@ -1003,6 +1013,7 @@ function beginProfileTransition(user: TransitionUser | null): ProfileTransition 
   return token;
 }
 async function bootstrap(): Promise<void> {
+  registerNetworkHandlers();
   const callbackError = await finishPkceCallback();
   if (callbackError) startupError = callbackError;
   try {
