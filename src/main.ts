@@ -10,9 +10,10 @@ import { boardView, pieceRotated, type BoardOrientation } from "./orientation.js
 import { AuthTransitionGate, drainLatestAuthTransitions, loadGuestSafely, loadProfileIfCurrent, settleAccountCleanup } from "./profile-state.js";
 import { buildReviewViewModel, findReviewEntry, parseReviewRoute, renderReviewPage, reviewEntries, reviewRoute, type ReviewEntry, type ReviewState } from "./review-page.js";
 import { createNormalizedMigrationClient, semanticSourceHash, type AuditResult, type MigrationStatus } from "./normalized.js";
-import { executeMigration, prepareMigration, reenterVerifiedMigration, type MigrationPreparation, type MigrationProof } from "./migration-flow.js";
+import { countData, executeMigration, prepareMigration, reenterVerifiedMigration, type MigrationPreparation, type MigrationProof } from "./migration-flow.js";
 import { assertKnownWritableAuthority, LocalStorageAuthorityCache, resolveAuthority, type AuthoritySnapshot } from "./authority.js";
 import { IndexedDbNormalizedCache, SupabaseNormalizedRuntime } from "./normalized-runtime.js";
+import { renderFinalizedMigrationStatus } from "./migration-status.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -66,6 +67,7 @@ if (!app) throw new Error("找不到 app 容器。");
 const esc = (value: string): string => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] ?? c));
 const uid = (prefix: string): string => `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`;
 const statusText = (): string => {
+  if (authority?.authority === "normalized") return "正規化雲端資料為權威來源";
   if (syncStatus === "已同步") return `已同步 · ${relativeTime(syncMetadata.lastSyncedAt)}`;
   if (syncStatus === "離線／同步失敗") return "同步失敗 · 重試";
   if (syncStatus === "衝突") return "需要處理衝突";
@@ -324,7 +326,7 @@ function navigateReview(direction: -1 | 1): void {
   if (next) location.hash = reviewRoute(next.game.id, next.point.id);
 }
 function renderSettings(): void {
-  selectedGame = undefined; const count = data.games.length; app!.innerHTML = `${header()}<main><a class="nav-link" href="#/">← 首頁</a><h1>設定</h1><div class="settings-grid"><section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>${esc(activeUser.email ?? "Google 帳號")}</strong></p><p>此裝置資料：${count} 局</p><p data-sync-status role="status" aria-live="polite">${esc(statusText())}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><button data-sync-retry ${syncStatus === "已同步" ? "hidden" : ""}>${syncStatus === "衝突" ? "處理衝突" : "立即同步"}  </button><a class="button-link secondary" href="#/migration">驗證資料遷移</a><button id="logout-remove" class="danger">登出並移除此裝置的帳號資料</button>` : `<p>訪客資料只保存在此裝置。</p><button data-login>使用 Google 登入</button><button id="clear-guest" class="danger" ${count ? "" : "disabled"}>清除訪客資料</button>`}</section><section class="panel"><h2>備份與還原</h2><p>資料先保存在此裝置；登入後會安全同步至你的私人雲端。</p><div class="actions"><button id="export">下載備份</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section></div></main>`; bindCommon(); document.querySelector("#export")?.addEventListener("click", () => { generateBackup(); }); document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e)); document.querySelector("#clear-guest")?.addEventListener("click", () => openDestructive("clear-guest")); document.querySelector("#logout-remove")?.addEventListener("click", () => openDestructive("remove-profile")); document.querySelector("[data-sync-retry]")?.addEventListener("click", () => { if (pendingConflict) openDestructive("conflict"); else void syncNow(); });
+  selectedGame = undefined; const count = data.games.length; const normalized = authority?.authority === "normalized"; const cloudCopy = normalized ? "正規化雲端資料是此帳號的權威來源；legacy 備份已保留。" : "資料先保存在此裝置；登入後會安全同步至你的私人雲端。"; app!.innerHTML = `${header()}<main><a class="nav-link" href="#/">← 首頁</a><h1>設定</h1><div class="settings-grid"><section class="panel"><h2>帳號與同步</h2>${activeUser ? `<p><strong>${esc(activeUser.email ?? "Google 帳號")}</strong></p><p>此裝置資料：${count} 局</p><p data-sync-status role="status" aria-live="polite">${esc(statusText())}${syncMessage ? `：${esc(syncMessage)}` : ""}</p><button data-sync-retry ${normalized || syncStatus === "已同步" ? "hidden" : ""}>${syncStatus === "衝突" ? "處理衝突" : "立即同步"}  </button><a class="button-link secondary" href="#/migration">${normalized ? "查看遷移狀態" : "驗證資料遷移"}</a><button id="logout-remove" class="danger">登出並移除此裝置的帳號資料</button>` : `<p>訪客資料只保存在此裝置。</p><button data-login>使用 Google 登入</button><button id="clear-guest" class="danger" ${count ? "" : "disabled"}>清除訪客資料</button>`}</section><section class="panel"><h2>備份與還原</h2><p>${cloudCopy}</p><div class="actions"><button id="export">下載備份</button><label class="file-button">還原備份<input id="backup" type="file" accept=".json"></label></div><p id="error" class="error" role="alert">${esc(startupError)}</p></section></div></main>`; bindCommon(); document.querySelector("#export")?.addEventListener("click", () => { generateBackup(); }); document.querySelector<HTMLInputElement>("#backup")?.addEventListener("change", (e) => void restoreFile(e)); document.querySelector("#clear-guest")?.addEventListener("click", () => openDestructive("clear-guest")); document.querySelector("#logout-remove")?.addEventListener("click", () => openDestructive("remove-profile")); document.querySelector("[data-sync-retry]")?.addEventListener("click", () => { if (pendingConflict) openDestructive("conflict"); else void syncNow(); });
 }
 function downloadMigrationBackup(value: string): void {
   const link = document.createElement("a");
@@ -341,6 +343,12 @@ function renderMigration(): void {
   selectedGame = undefined;
   if (!activeUser) {
     app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><section class="panel"><h1>資料遷移驗證</h1><p class="warning" role="alert">請先登入，才能使用已驗證的遷移功能。</p><a class="button-link" href="#/login" data-login>使用 Google 登入</a></section></main>`;
+    bindCommon();
+    return;
+  }
+  const status = migrationStatus ?? authority?.status;
+  if (status?.status === "finalized") {
+    app!.innerHTML = `${header()}<main><a class="nav-link" href="#/settings">← 設定</a><h1>資料遷移驗證</h1>${renderFinalizedMigrationStatus(status, data)}</main>`;
     bindCommon();
     return;
   }
@@ -392,9 +400,8 @@ async function finalizeCutover(): Promise<void> {
   }
 }
 function countSummary(value: AppData): string {
-  const points = value.games.reduce((total, game) => total + game.reviewPoints.length, 0);
-  const recommendations = value.games.reduce((total, game) => total + game.reviewPoints.reduce((count, point) => count + (point.recommendedMoves?.length ?? 0), 0), 0);
-  return `${value.games.length} / ${points} / ${recommendations}`;
+  const counts = countData(value);
+  return `${counts.games} / ${counts.points} / ${counts.recommendations}`;
 }
 function formatAuditCounts(value: Record<string, number> | undefined): string {
   return `${value?.games ?? 0} / ${value?.points ?? value?.review_points ?? value?.reviewPoints ?? 0} / ${value?.recommendations ?? value?.recommended_moves ?? value?.recommendedMoves ?? 0}`;
@@ -854,6 +861,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   autosync.invalidate();
   pendingConflict = undefined;
   const expectedUserId = profile.startsWith("user:") ? profile.slice("user:".length) : undefined;
+  let resolvedMigrationStatus: MigrationStatus | null | undefined;
   const isCurrent = () => profileTransition === token && desiredUserId === (token.user?.id);
   if (expectedUserId) {
     let resolved: AuthoritySnapshot;
@@ -876,6 +884,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
     }
     if (!isCurrent()) return "aborted";
     authority = resolved;
+    resolvedMigrationStatus = resolved.status;
     if (resolved.authority === "normalized") {
       normalizedRuntime = new SupabaseNormalizedRuntime(supabase, expectedUserId, normalizedCache);
       let normalizedData: AppData | null;
@@ -907,6 +916,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
       activeUser = token.user;
       activeProfile = profile;
       data = normalizedData;
+      migrationStatus = resolvedMigrationStatus;
       profileLoadFailed = false;
       profileTransition = undefined;
       return "activated";
@@ -914,6 +924,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   } else {
     authority = null;
     normalizedRuntime = null;
+    migrationStatus = undefined;
   }
   if (expectedUserId && authority?.authority === "unknown") {
     activeUser = token.user;
@@ -960,6 +971,7 @@ async function activateProfile(profile: ProfileKey, token: ProfileTransition): P
   activeUser = token.user;
   activeProfile = profile;
   data = loaded.data;
+  migrationStatus = resolvedMigrationStatus;
   syncMetadata = expectedUserId ? readMetadata(expectedUserId) : { hashVersion: 1 };
   profileLoadFailed = false;
   profileTransition = undefined;
@@ -973,6 +985,11 @@ function beginProfileTransition(user: TransitionUser | null): ProfileTransition 
   profileTransition = token;
   authority = null;
   normalizedRuntime = null;
+  migrationPreparation = undefined;
+  migrationProof = undefined;
+  migrationStatus = undefined;
+  migrationAuditResult = undefined;
+  migrationErrorMessage = "";
   activeUser = null;
   activeProfile = "guest";
   data = { games: [] };
