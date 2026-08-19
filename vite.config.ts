@@ -16,6 +16,7 @@ function offlineShellPlugin(): Plugin {
       const assetJson = JSON.stringify(["index.html", ...assets]);
       const source = `const CACHE_NAME = "shogi-review-shell-${version}";
 const BASE = self.location.pathname.slice(0, -5);
+const APP_ROOT = new URL(".", self.location.origin + BASE).href;
 const SHELL = new URL("index.html", self.location.origin + BASE).href;
 const ASSETS = ${assetJson}.map((asset) => new URL(asset, self.location.origin + BASE).href);
 const KILL_SWITCH = false;
@@ -23,7 +24,7 @@ const PRIVATE_PATHS = ["/auth", "/rest/v1", "/rpc", "/functions/v1", "/storage/v
 
 self.addEventListener("install", (event) => {
   if (KILL_SWITCH) return;
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll([APP_ROOT, ...ASSETS])));
 });
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
