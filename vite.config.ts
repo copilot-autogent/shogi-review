@@ -1,5 +1,57 @@
-import { defineConfig } from "vite";
+import { createHash } from "node:crypto";
+import { defineConfig, type Plugin } from "vite";
+
+function offlineShellPlugin(): Plugin {
+  return {
+    name: "offline-shell",
+    generateBundle(_options, bundle) {
+      const assets = Object.keys(bundle).filter((name) => name !== "sw.js").sort();
+      const version = createHash("sha256").update(assets.join("\n")).digest("hex").slice(0, 16);
+      const assetJson = JSON.stringify(["index.html", ...assets]);
+      const source = `const CACHE_NAME = "shogi-review-shell-${version}";
+const BASE = self.location.pathname.slice(0, -5);
+const SHELL = new URL("index.html", self.location.origin + BASE).href;
+const ASSETS = ${assetJson}.map((asset) => new URL(asset, self.location.origin + BASE).href);
+const KILL_SWITCH = false;
+const PRIVATE_PATHS = ["/auth", "/rest/v1", "/rpc", "/functions/v1", "/storage/v1", "/oauth"];
+const PAYLOAD_QUERY = /(?:^|&)(?:code|state|access_token|refresh_token|error|error_description)=/i;
+
+self.addEventListener("install", (event) => {
+  if (KILL_SWITCH) return;
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
+});
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    if (KILL_SWITCH) {
+      await self.registration.unregister();
+      return;
+    }
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key.startsWith("shogi-review-shell-") && key !== CACHE_NAME).map((key) => caches.delete(key)));
+  })());
+});
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.origin !== self.location.origin || request.headers.has("range") || PRIVATE_PATHS.some((path) => url.pathname === path || url.pathname.startsWith(path + "/")) || PAYLOAD_QUERY.test(url.search.slice(1))) return;
+  const isAsset = ASSETS.includes(url.href);
+  if (request.mode === "navigate") {
+    if (url.search) return;
+    event.respondWith(fetch(request).then((response) => {
+      if (response.ok) void caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+      return response;
+    }).catch(() => caches.match(request).then((cached) => cached ?? caches.match(SHELL).then((shell) => shell ?? Response.error()))));
+  } else if (isAsset) {
+    event.respondWith(caches.match(request).then((cached) => cached ?? fetch(request)));
+  }
+});
+`;
+      this.emitFile({ type: "asset", fileName: "sw.js", source });
+    },
+  };
+}
 
 export default defineConfig({
   base: "/shogi-review/",
+  plugins: [offlineShellPlugin()],
 });

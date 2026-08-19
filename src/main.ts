@@ -816,6 +816,10 @@ function registerNetworkHandlers(): void {
   window.addEventListener("online", handleOnline);
   window.addEventListener("pageshow", (event) => { if (event.persisted) (globalThis.navigator.onLine ? handleOnline : handleOffline)(); });
 }
+function registerOfflineShell(): void {
+  if (!import.meta.env.PROD || !("serviceWorker" in globalThis.navigator)) return;
+  void globalThis.navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { updateViaCache: "none" });
+}
 function identityIsCurrent(identity: { uid: string; profile: ProfileKey; generation: number }): boolean {
   const current = currentPersistenceIdentity();
   return Boolean(current && current.uid === identity.uid && current.profile === identity.profile && current.generation === identity.generation);
@@ -1013,6 +1017,7 @@ function beginProfileTransition(user: TransitionUser | null): ProfileTransition 
   return token;
 }
 async function bootstrap(): Promise<void> {
+  registerOfflineShell();
   registerNetworkHandlers();
   const callbackError = await finishPkceCallback();
   if (callbackError) startupError = callbackError;
