@@ -1,6 +1,8 @@
+interface ImportMetaEnv {
+  readonly BASE_URL: string;
+  readonly PROD: boolean;
+}
+
 interface ImportMeta {
-  readonly env: {
-    readonly BASE_URL: string;
-    readonly PROD: boolean;
-  };
+  readonly env: ImportMetaEnv;
 }

@@ -31,14 +31,22 @@ async function mockFinalizedAccount(page: Page): Promise<void> {
 test("production app shell reloads offline without serving API data from Cache Storage", async ({ page, context }) => {
   await mockFinalizedAccount(page);
   await page.goto("#/settings");
-  await expect(page.locator("[data-sync-status]")).toContainText("正規化雲端資料為權威來源");
+  await expect(page.locator("main [data-sync-status]")).toContainText("正規化雲端資料為權威來源");
   await page.evaluate(() => window.navigator.serviceWorker.ready);
   await context.setOffline(true);
   await page.reload();
   await expect(page.locator("#app")).toBeVisible();
-  await expect(page.locator("[data-sync-status]")).toContainText("正規化雲端資料為權威來源");
+  await expect(page.locator("main [data-sync-status]")).toContainText("正規化雲端資料為權威來源");
   await expect(page.locator("[data-authority-warning]")).toContainText("目前離線；已停用雲端資料修改，重新連線後再試。");
   await expect(page.locator("#import, [data-rename], [data-game-delete], [data-delete], [data-add-recommendation]")).toHaveCount(0);
+  await expect(page.evaluate(async (url) => {
+    try {
+      await window.fetch(url);
+      return "served";
+    } catch {
+      return "blocked";
+    }
+  }, `${SUPABASE_URL}/rest/v1/games`)).resolves.toBe("blocked");
   const cacheUrls = await page.evaluate(async () => {
     const keys = await window.caches.keys();
     return (await Promise.all(keys.map(async (key) => (await window.caches.open(key)).keys()))).flat().map((request) => request.url);
