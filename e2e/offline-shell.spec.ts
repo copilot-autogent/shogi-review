@@ -34,6 +34,7 @@ test("production app shell reloads offline without serving API data from Cache S
   await expect(page.locator("main [data-sync-status]")).toContainText("正規化雲端資料為權威來源");
   await page.evaluate(() => window.navigator.serviceWorker.ready);
   await page.reload();
+  await expect.poll(() => page.evaluate(() => Boolean(window.navigator.serviceWorker.controller))).toBe(true);
   await context.setOffline(true);
   await page.reload({ waitUntil: "commit" }).catch(() => undefined);
   await expect(page.locator("#app")).toBeVisible();
