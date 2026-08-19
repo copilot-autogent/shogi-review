@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { defineConfig, type Plugin } from "vite";
 
 function offlineShellPlugin(): Plugin {
@@ -6,11 +7,13 @@ function offlineShellPlugin(): Plugin {
     name: "offline-shell",
     generateBundle(_options, bundle) {
       const assets = Object.keys(bundle).filter((name) => name !== "sw.js").sort();
-      const version = createHash("sha256").update(JSON.stringify(assets.map((name) => {
+    const versionInputs: Array<readonly [string, string]> = assets.map((name) => {
         const item = bundle[name];
         return [name, item.type === "asset" ? String(item.source) : item.code];
-      }))).digest("hex").slice(0, 16);
-      const assetJson = JSON.stringify(assets);
+    });
+    versionInputs.push(["index.html", readFileSync("index.html", "utf8")]);
+    const version = createHash("sha256").update(JSON.stringify(versionInputs)).digest("hex").slice(0, 16);
+      const assetJson = JSON.stringify(["index.html", ...assets]);
       const source = `const CACHE_NAME = "shogi-review-shell-${version}";
 const BASE = self.location.pathname.slice(0, -5);
 const SHELL = new URL("index.html", self.location.origin + BASE).href;
