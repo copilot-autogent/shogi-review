@@ -37,7 +37,7 @@ test("production app shell reloads offline without serving API data from Cache S
   await expect.poll(() => page.evaluate(() => Boolean(window.navigator.serviceWorker.controller))).toBe(true);
   await context.setOffline(true);
   await page.reload({ waitUntil: "commit" }).catch(() => undefined);
-  await expect(page.locator("#app")).toBeVisible();
+  await expect(page.locator("main")).toBeVisible();
   await expect(page.locator("main [data-sync-status]")).toContainText("正規化雲端資料為權威來源");
   await expect(page.locator("[data-authority-warning]")).toContainText("目前離線；已停用雲端資料修改，重新連線後再試。");
   await expect(page.locator("#import, [data-rename], [data-game-delete], [data-delete], [data-add-recommendation]")).toHaveCount(0);
