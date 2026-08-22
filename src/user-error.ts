@@ -14,6 +14,7 @@ const SAFE_LOCAL_MESSAGES = new Set([
   "目前離線；已停用雲端資料修改，重新連線後再試。",
   "無法確認帳號資料來源；目前僅能檢視，請重新連線後再修改。",
   "資料版本已變更或已刪除，請重新載入後再試。",
+  "無法建立安全的棋局排序值。",
 ]);
 
 export function userErrorMessage(error: unknown): string {
