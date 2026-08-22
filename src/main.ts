@@ -14,6 +14,7 @@ import { countData, executeMigration, prepareMigration, reenterVerifiedMigration
 import { assertKnownWritableAuthority, LocalStorageAuthorityCache, resolveAuthority, type AuthoritySnapshot } from "./authority.js";
 import { IndexedDbNormalizedCache, SupabaseNormalizedRuntime } from "./normalized-runtime.js";
 import { renderFinalizedMigrationStatus } from "./migration-status.js";
+import { userErrorMessage } from "./user-error.js";
 import type { Session } from "@supabase/supabase-js";
 import "./style.css";
 
@@ -885,7 +886,7 @@ async function resolveConflict(choices: Record<string, "cloud" | "local">): Prom
     conflictResolutionRunning = false;
   }
 }
-function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = error instanceof Error ? error.message : "發生未知錯誤。"; }
+function showError(error: unknown): void { const target = document.querySelector("#error"); if (target) target.textContent = userErrorMessage(error); }
 async function prepareAccountProfile(uid: string, isCurrent: () => boolean = () => true): Promise<void> {
   const guest = await repo.loadProfile("guest");
   if (!isCurrent()) return;

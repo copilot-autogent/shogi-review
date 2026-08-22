@@ -3,6 +3,7 @@ import { Client } from "pg";
 import { parseBackup } from "../src/backup.js";
 import { parseGame } from "../src/parser.js";
 import { canonicalData, payloadHash } from "../src/sync.js";
+import { importSourceOrder, MAX_SOURCE_ORDER } from "../src/normalized-order.js";
 
 const connection = {
   host: process.env.PGHOST ?? "127.0.0.1",
@@ -165,6 +166,14 @@ await expectFailure(b, "insert into public.games(user_id,id,title,source_format,
 const anonymousRows = await anon.query("select * from public.games");
 if (anonymousRows.rowCount !== 0) throw new Error("anonymous RLS select exposed normalized rows");
 await expectFailure(anon, "insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text) values ($1,'anon','x','KIF','x','x',array['x'],array[]::text[],'x','x')", "anonymous insert", "row-level security", [alice]);
+const currentImportOrder = importSourceOrder("2026-08-22T13:27:09.151Z");
+if (currentImportOrder <= 0 || currentImportOrder > MAX_SOURCE_ORDER) throw new Error("current import order was not bounded");
+await a.query("insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text,source_order) values ($1,'current-import','current','KIF','x','x',array['x'],array[]::text[],'current-import','2026-08-22T13:27:09.151Z',$2)", [alice, currentImportOrder]);
+await a.query("insert into public.games(user_id,id,title,source_format,source_text,initial_sfen,sfens,moves,canonical_hash,created_at_text,source_order) values ($1,'current-import-2','current','KIF','x','x',array['x'],array[]::text[],'current-import-2','2026-08-22T13:27:59.151Z',$2)", [alice, currentImportOrder]);
+const currentImport = await a.query("select source_order from public.games where user_id = $1 and id = 'current-import'", [alice]);
+if (currentImport.rows[0].source_order !== currentImportOrder) throw new Error("bounded current-time import did not round-trip through PostgreSQL integer");
+const sameMinute = await a.query("select id from public.games where user_id = $1 and id like 'current-import%' order by source_order, id", [alice]);
+if (sameMinute.rows.map((row) => row.id).join(",") !== "current-import,current-import-2") throw new Error("same-minute imports were not deterministically ordered");
 
 // A writer holding the legacy row lock must serialize before finalize and be observed.
 const snapshot = await a.query("select revision, payload from public.user_state where user_id = $1", [alice]);

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AppData, Game, RecommendedMove, ReviewPoint } from "./model.js";
 import type { NormalizedGame, NormalizedReviewPoint } from "./normalized.js";
+import { importSourceOrder } from "./normalized-order.js";
 
 type Row = Record<string, unknown>;
 type NormalizedRecommendationRow = { id: string; pointId: string; move: string; comment: string | null; sortOrder: number; version: number };
@@ -189,7 +190,7 @@ export class SupabaseNormalizedRuntime {
       user_id: this.userId, id: game.id, title: game.title, source_format: game.sourceFormat, source_text: game.sourceText,
       initial_sfen: game.initialSfen, sfens: game.sfens, moves: game.moves, canonical_hash: game.canonicalHash,
       created_at_text: game.createdAt, perspective: game.perspective ?? null, perspective_present: game.perspective !== undefined,
-      source_order: Number.isFinite(Date.parse(game.createdAt)) ? Date.parse(game.createdAt) : 0,
+      source_order: importSourceOrder(game.createdAt),
     }).select("*");
     if (result.error) throw result.error;
     assertOne(result.data as Row[] | null, "normalized game insert was not confirmed");
